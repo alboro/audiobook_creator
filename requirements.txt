@@ -7,6 +7,18 @@ edge-tts==7.2.7
 pydub==0.25.1
 wyoming==1.6.0
 gradio==5.50.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
 docker==7.1.0
 sentencex==0.6.1
 gradio_log==0.0.8
+num2words==0.5.14
+pymorphy3==2.0.6
+pymorphy3-dicts-ru==2.4.417150.4580142
+tsnorm==1.1.2
+ru-core-news-md==3.8.0
+# Optional: Qwen3 TTS provider (Aliyun DashScope API, supports Russian)
+# dashscope>=1.24.6
+# Optional: Gemini TTS provider (Google AI, supports Russian, 30+ voices)
+# google-genai>=1.0.0
+faster-whisper>=1.0.0

@@ -42,6 +42,13 @@ def _sanitize_base_name(name):
     return sanitized or "untitled"
 
 
+def make_chapter_key(title, idx) -> str:
+    """Build a safe directory-name key for a chapter (no extension, no collision check)."""
+    prefix = f"{idx:04d}_" if idx is not None else ""
+    base = _sanitize_base_name(title)
+    return f"{prefix}{base}" if base else prefix.rstrip("_") or "chapter"
+
+
 def make_safe_filename(
     title, idx, output_dir, ext, reserve=16, collision_check=True
 ):

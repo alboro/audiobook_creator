@@ -148,6 +148,11 @@ def split_long_sentence(sentence: str, max_chars: int) -> List[str]:
 
 def set_audio_tags(output_file, audio_tags):
     try:
+        suffix = os.path.splitext(output_file)[1].lower()
+        if suffix != ".mp3":
+            logger.debug("Skipping ID3 tagging for non-MP3 output: %s", output_file)
+            return
+
         try:
             tags = ID3(output_file)
             logger.debug(f"tags: {tags}")

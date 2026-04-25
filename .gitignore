@@ -6,6 +6,7 @@ __pycache__/
 
 # Virtual environment
 venv/
+.venv/
 .idea
 .history/
 .run/
@@ -31,7 +32,6 @@ audiobook_output/
 private_examples/
 
 # custom
-scripts/
 *.onnx
 *.onnx.json
 
@@ -41,7 +41,18 @@ piper_models/*
 # Env files
 .env
 
+# Local INI configs (per-machine / per-book overrides; not committed)
+# Exception: *.example.ini files in the repo are templates and ARE committed.
+*.ini
+!*.example.ini
+
 # Temp Test files
 test.py
 
+.idea/*
 logs/
+.local/
+.cache/
+.venv_py311_broken_*/
+out/
+input/

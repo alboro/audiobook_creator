@@ -1,0 +1,348 @@
+# Copyright (c) 2026 alboro <alboro@users.noreply.github.com>
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See: https://polyformproject.org/licenses/noncommercial/1.0.0/
+
+"""Chunked TTS audio generation with sentence-level resume.
+
+Usage
+-----
+Instead of sending an entire chapter text as one TTS call, this module:
+
+1. Splits the chapter text into sentences.
+2. Detects quoted blocks and further splits them, optionally using a secondary
+   voice (``voice_name2``) for character speech.
+3. Computes a content-hash for each sentence (voice suffix added when voice2 used).
+4. Skips sentences whose audio file already exists on disk (file = truth).
+5. Calls the TTS provider for each missing sentence.
+6. Trims trailing silence from each synthesised chunk (keeps a 200ms tail).
+7. Concatenates all chunk audio files into the chapter output file.
+
+Enable with ``--chunked_audio`` CLI flag.
+Secondary voice: set ``voice_name2`` in config/ini for quoted character speech.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import re
+from contextlib import contextmanager
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+from audiobook_generator.core.audio_chunk_store import AudioChunkStore
+from audiobook_generator.core.audio_tags import AudioTags
+from audiobook_generator.utils.sentence_hash import sentence_hash as _sentence_hash
+
+logger = logging.getLogger(__name__)
+
+# Minimum sentence length to synthesise (skip whitespace-only fragments).
+MIN_SENTENCE_CHARS = 3
+
+# Silence trimming: keep this many ms of audio after the last non-silent segment.
+SILENCE_TAIL_MS = 200
+# Silence threshold in dBFS below which a segment is considered silent.
+SILENCE_THRESH_DBFS = -45
+
+# Opening/closing quote pairs to detect character speech blocks.
+# Each tuple: (open_char, close_char)
+_QUOTE_PAIRS: List[Tuple[str, str]] = [
+    ('\u00ab', '\u00bb'),   # «»  (Russian guillemets)
+    ('\u201c', '\u201d'),   # ""  (English/typographic double quotes)
+    ('\u2018', '\u2019'),   # ''  (single typographic)
+    ('"', '"'),             # straight double quotes
+]
+# Opening chars for fast lookup
+_OPEN_QUOTES = {p[0] for p in _QUOTE_PAIRS}
+# Mapping open → close
+_CLOSE_FOR_OPEN = {p[0]: p[1] for p in _QUOTE_PAIRS}
+
+
+def split_into_sentences(text: str, language: str = "ru") -> List[str]:
+    """Split *text* into sentences using sentencex.
+
+    Falls back to splitting on double-newlines if sentencex is not available.
+    """
+    try:
+        from sentencex import segment  # type: ignore
+        from audiobook_generator.normalizers.tts_safe_split_normalizer import (
+            _merge_broken_backtick_sentences,
+        )
+        lang = language.split("-")[0]  # "ru-RU" → "ru"
+        sentences = list(segment(lang, text))
+        sentences = _merge_broken_backtick_sentences(sentences)
+    except Exception:
+        # Simple fallback: split on paragraph boundaries
+        sentences = [s.strip() for s in text.split("\n\n") if s.strip()]
+    return [s for s in sentences if len(s.strip()) >= MIN_SENTENCE_CHARS]
+
+
+def _is_fully_quoted(text: str) -> Optional[Tuple[str, str]]:
+    """If the entire *text* is wrapped in a matching quote pair, return (open, close).
+
+    Allows optional punctuation after the closing quote (e.g. «...». ).
+    Returns None if not a quoted block.
+    """
+    t = text.strip()
+    if not t:
+        return None
+    open_char = t[0]
+    if open_char not in _OPEN_QUOTES:
+        return None
+    close_char = _CLOSE_FOR_OPEN[open_char]
+    # Find last occurrence of closing quote (may be followed by punctuation/space)
+    idx = t.rfind(close_char)
+    if idx <= 0:
+        return None
+    # Everything after the close quote should only be punctuation/whitespace
+    after = t[idx + 1:].strip()
+    if after and not re.fullmatch(r'[\s.,!?;:\-…]+', after):
+        return None
+    # The opening quote must come before the closing quote
+    return (open_char, close_char)
+
+
+def split_sentences_with_voices(
+    text: str,
+    language: str = "ru",
+    voice2: Optional[str] = None,
+) -> List[Tuple[str, Optional[str]]]:
+    """Split *text* into (sentence_text, voice_override) pairs.
+
+    When *voice2* is set, sentences that form a fully-quoted block are
+    further split internally and tagged with *voice2*.  If *voice2* is None,
+    all sentences use the default voice (None).
+    """
+    sentences = split_into_sentences(text, language)
+    result: List[Tuple[str, Optional[str]]] = []
+
+    for sentence in sentences:
+        quote_pair = _is_fully_quoted(sentence) if voice2 else None
+        if quote_pair:
+            open_char, close_char = quote_pair
+            # Extract inner text (strip outer quotes, preserve trailing punctuation)
+            inner = sentence.strip()
+            inner = inner[len(open_char):]  # remove opening quote
+            close_idx = inner.rfind(close_char)
+            after_close = inner[close_idx + len(close_char):].strip()
+            inner = inner[:close_idx].strip()  # remove closing quote
+            # If the outer sentence had sentence-ending punctuation after the closing quote,
+            # append it to the inner text so the last sub-sentence isn't cut off.
+            if after_close and re.match(r'^[.!?…]', after_close):
+                inner = inner + after_close[0]
+            inner_sentences = split_into_sentences(inner, language)
+            if len(inner_sentences) > 1:
+                logger.debug(
+                    "Quoted block split into %d sub-sentences (voice2=%s): %s…",
+                    len(inner_sentences), voice2, sentence[:60],
+                )
+                for sub in inner_sentences:
+                    result.append((sub, voice2))
+                continue
+            # Only one inner sentence — keep original sentence text with voice2
+            result.append((sentence, voice2))
+        else:
+            result.append((sentence, None))
+
+    return result
+
+
+def _trim_trailing_silence(audio_path: str, tail_ms: int = SILENCE_TAIL_MS) -> None:
+    """Trim trailing silence from *audio_path* in-place, keeping *tail_ms* ms after the last
+    non-silent segment.
+
+    Algorithm:
+    1. Find the last non-silent chunk using pydub.silence.detect_nonsilent.
+    2. Cut everything after it plus tail_ms.
+    3. Overwrite the file.
+    """
+    try:
+        from pydub import AudioSegment  # type: ignore
+        from pydub.silence import detect_nonsilent  # type: ignore
+
+        seg = AudioSegment.from_file(audio_path)
+        nonsilent_ranges = detect_nonsilent(
+            seg,
+            min_silence_len=100,
+            silence_thresh=SILENCE_THRESH_DBFS,
+            seek_step=10,
+        )
+        if not nonsilent_ranges:
+            return  # entire segment is silent — leave as is
+
+        last_end_ms = nonsilent_ranges[-1][1]
+        trim_end_ms = min(last_end_ms + tail_ms, len(seg))
+        if trim_end_ms >= len(seg) - 10:
+            return  # nothing significant to trim
+
+        trimmed = seg[:trim_end_ms]
+        ext = Path(audio_path).suffix.lstrip(".") or "wav"
+        trimmed.export(audio_path, format=ext)
+        logger.debug("Trimmed trailing silence: kept %d ms (was %d ms) in %s",
+                     trim_end_ms, len(seg), audio_path)
+    except ImportError:
+        logger.debug("pydub not available — skipping silence trimming for %s", audio_path)
+    except Exception as exc:
+        logger.debug("Silence trimming failed for %s: %s", audio_path, exc)
+
+
+def _merge_audio_files(chunk_paths: List[str], output_path: str) -> None:
+    """Concatenate audio chunk files into *output_path* using pydub."""
+    try:
+        from pydub import AudioSegment  # type: ignore
+
+        combined: Optional[AudioSegment] = None
+        for path in chunk_paths:
+            seg = AudioSegment.from_file(path)
+            combined = seg if combined is None else combined + seg
+        if combined is not None:
+            out = Path(output_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            fmt = out.suffix.lstrip(".") or "mp3"
+            combined.export(str(out), format=fmt)
+        logger.debug("Merged %d chunks into %s", len(chunk_paths), output_path)
+    except ImportError:
+        raise RuntimeError(
+            "pydub is required for chunked audio merging. "
+            "Install it with: pip install pydub"
+        )
+
+
+class ChunkedAudioGenerator:
+    """Per-chapter chunked TTS synthesiser with filesystem-based resume."""
+
+    def __init__(
+        self,
+        *,
+        config,
+        chunk_store: AudioChunkStore,
+        tts_provider,
+        chunks_base_dir: str,
+        run_id: str = "",
+    ):
+        self.config = config
+        self.store = chunk_store
+        self.tts_provider = tts_provider
+        self.chunks_base_dir = Path(chunks_base_dir)
+
+    def _chunk_dir(self, chapter_key: str) -> Path:
+        """Return (and create) the directory for this chapter's chunk files."""
+        d = self.chunks_base_dir / chapter_key
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _chunk_path(self, chapter_key: str, s_hash: str, voice_override: Optional[str] = None) -> str:
+        ext = self.tts_provider.get_output_file_extension()
+        # Single naming scheme regardless of voice: <hash>.<ext>
+        # Voice assignment is determined by context (quoted block detection), not the filename.
+        return str(self._chunk_dir(chapter_key) / f"{s_hash}.{ext}")
+
+    @contextmanager
+    def _voice_override(self, voice: Optional[str]):
+        """Temporarily swap config.voice_name for one TTS call."""
+        if voice is None or voice == self.config.voice_name:
+            yield
+            return
+        original = self.config.voice_name
+        self.config.voice_name = voice
+        try:
+            yield
+        finally:
+            self.config.voice_name = original
+
+    def process_chapter(
+        self,
+        *,
+        chapter_idx: int,
+        chapter_key: str,
+        text_for_tts: str,
+        output_file: str,
+        audio_tags: AudioTags,
+    ) -> bool:
+        """Synthesise all sentences for *chapter_key*, then merge into *output_file*.
+
+        Resume logic: if the chunk file already exists on disk, the sentence
+        is skipped (no TTS call).  Returns True on success.
+
+        If ``config.voice_name2`` is set, quoted character-speech blocks are
+        further split and synthesised with the secondary voice.
+        """
+        voice2 = getattr(self.config, 'voice_name2', None) or None
+        sentence_voice_pairs = split_sentences_with_voices(
+            text_for_tts, self.config.language or "ru", voice2=voice2
+        )
+        if not sentence_voice_pairs:
+            logger.warning("Chapter %d '%s' produced no sentences; skipping.", chapter_idx, chapter_key)
+            return False
+
+        logger.info(
+            "Chapter %d: %d sentences to synthesise (chunked mode, voice2=%s).",
+            chapter_idx, len(sentence_voice_pairs), voice2,
+        )
+
+        # Record sentence texts in version history (INSERT OR IGNORE — no-op if already present).
+        registered_new = 0
+        registered_existing = 0
+        for sentence, _voice in sentence_voice_pairs:
+            s_hash = _sentence_hash(sentence)
+            if self.store.save_sentence_version(s_hash, sentence):
+                registered_new += 1
+            else:
+                registered_existing += 1
+        logger.info(
+            "Chapter %d sentence text history: %d new, %d already known.",
+            chapter_idx, registered_new, registered_existing,
+        )
+
+        # Synthesise missing chunks (file existence = already done).
+        synthesised = 0
+        skipped = 0
+        errors = 0
+        for pos, (sentence, voice) in enumerate(sentence_voice_pairs):
+            s_hash = _sentence_hash(sentence)
+            chunk_path = self._chunk_path(chapter_key, s_hash, voice)
+            if os.path.exists(chunk_path):
+                skipped += 1
+                continue
+            try:
+                with self._voice_override(voice):
+                    self.tts_provider.text_to_speech(
+                        self.tts_provider.prepare_tts_text(sentence), chunk_path, audio_tags
+                    )
+                if getattr(self.config, "tts_trim_silence", True):
+                    _trim_trailing_silence(chunk_path)
+                synthesised += 1
+            except Exception as exc:
+                logger.error(
+                    "Chapter %d sentence %d synthesis failed: %s", chapter_idx, pos, exc
+                )
+                errors += 1
+
+        logger.info(
+            "Chapter %d synthesis done: %d new, %d skipped, %d errors.",
+            chapter_idx, synthesised, skipped, errors,
+        )
+
+        if errors > 0:
+            logger.warning(
+                "Chapter %d has %d synthesis errors; output may be incomplete.", chapter_idx, errors
+            )
+
+        # Collect synthesised chunk paths in sentence order (FS-based).
+        chunk_paths = [
+            self._chunk_path(chapter_key, _sentence_hash(s), v)
+            for s, v in sentence_voice_pairs
+            if os.path.exists(self._chunk_path(chapter_key, _sentence_hash(s), v))
+        ]
+        if not chunk_paths:
+            logger.error("Chapter %d: no audio chunks available for merging.", chapter_idx)
+            return False
+
+        # Merge chunks into the chapter output file.
+        try:
+            _merge_audio_files(chunk_paths, output_file)
+            logger.info("Chapter %d merged into %s", chapter_idx, output_file)
+            return True
+        except Exception as exc:
+            logger.error("Chapter %d merge failed: %s", chapter_idx, exc)
+            return False
+

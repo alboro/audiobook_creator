@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter Review</title>
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;background:#111118;color:#cdd6f4;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+.topbar{display:flex;align-items:center;gap:8px;padding:8px 14px;background:#1e1e2e;border-bottom:1px solid #313244;flex-shrink:0;flex-wrap:wrap}
+.topbar input{flex:1;min-width:200px;padding:5px 10px;border-radius:5px;border:1px solid #45475a;background:#313244;color:#cdd6f4;font-size:13px}
+.topbar input::placeholder{color:#6c7086}
+.btn{display:inline-flex;align-items:center;gap:4px;padding:5px 12px;border-radius:5px;border:none;cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap;transition:opacity .12s}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+.btn-primary{background:#89b4fa;color:#1e1e2e}
+.btn-secondary{background:#45475a;color:#cdd6f4}
+.btn-green{background:#a6e3a1;color:#1e1e2e}
+.btn-sm{padding:3px 8px;font-size:11px}
+.btn:hover:not(:disabled){opacity:.82}
+.topbar-right{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.spill{font-size:11px;color:#a6e3a1;padding:3px 8px;background:#1a2a1a;border-radius:12px;border:1px solid #2d4a2d;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.spill.err{color:#f38ba8;background:#2a1a1a;border-color:#4a2d2d}
+.layout{display:flex;flex:1;min-height:0;overflow:hidden}
+.sidebar{width:220px;flex-shrink:0;background:#181825;border-right:1px solid #313244;display:flex;flex-direction:column;overflow:hidden}
+.sidebar-hdr{padding:8px 12px;font-size:10px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#6c7086;background:#1e1e2e;border-bottom:1px solid #313244;flex-shrink:0}
+.ch-list{overflow-y:auto;flex:1}
+.ch-item{padding:7px 12px;cursor:pointer;border-bottom:1px solid #1a1a28;transition:background .1s}
+.ch-item:hover{background:#232336}
+.ch-item.active{background:#282840;border-left:3px solid #89b4fa;padding-left:9px}
+.ch-title{font-size:12px;color:#cdd6f4;line-height:1.3}
+.ch-meta{font-size:10px;color:#6c7086;margin-top:2px}
+.main{flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden}
+.chapter-bar{padding:8px 14px;background:#1e1e2e;border-bottom:1px solid #313244;display:flex;align-items:center;gap:8px;flex-shrink:0;min-height:38px}
+.chapter-bar h2{font-size:14px;color:#cdd6f4;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chunk-list{flex:1;overflow-y:auto;padding:4px 0}
+.chunk-row{display:flex;align-items:flex-start;gap:6px;padding:5px 14px;border-bottom:1px solid #1a1a28;transition:background .08s}
+.chunk-row:hover{background:#1e1e2e}
+.chunk-row.playing{background:#0f1f18;border-left:3px solid #a6e3a1;padding-left:11px}
+.chunk-row.editing{background:#1a1828;border-left:3px solid #cba6f7;padding-left:11px}
+.chunk-row.hist-open{background:#1e1a14;border-left:3px solid #fab387;padding-left:11px}
+.chunk-row.disputed{background:#1f1418;border-left:3px solid #f38ba8;padding-left:11px}
+.disputed-badge{display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;color:#f38ba8;background:#2a1520;border:1px solid #4a2535;border-radius:10px;padding:1px 6px;margin-left:6px;vertical-align:middle}
+.disputed-panel{margin-top:6px;border-top:1px solid #313244;padding-top:6px}
+.disp-sim{font-size:9px;color:#f38ba8;font-family:monospace;margin-bottom:3px}
+.disp-transcription{font-size:11px;color:#fab387;line-height:1.4;white-space:pre-wrap;word-break:break-word;border-left:2px solid #f38ba8;padding-left:6px;margin-top:3px}
+.cnum{font-size:10px;color:#6c7086;min-width:26px;padding-top:4px;text-align:right;flex-shrink:0}
+.cbody{flex:1;min-width:0}
+.ctext{font-size:13px;color:#cdd6f4;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.ctext.noaudio{color:#585870}
+.chash{font-size:9px;color:#45475a;font-family:monospace;margin-top:1px}
+.edit-area{width:100%;background:#252538;color:#cdd6f4;border:1px solid #89b4fa;border-radius:4px;padding:6px 8px;font-size:13px;line-height:1.5;resize:vertical;min-height:60px;font-family:inherit;margin-top:4px}
+.edit-row{display:flex;gap:5px;margin-top:5px}
+.cbtns{display:flex;gap:2px;flex-shrink:0;padding-top:3px}
+.ib{width:32px;height:32px;border-radius:5px;border:none;background:transparent;cursor:pointer;color:#585870;font-size:17px;display:flex;align-items:center;justify-content:center;transition:background .1s,color .1s;position:relative;flex-shrink:0}
+.ib:hover{background:#2a2a40;color:#cdd6f4}
+.ib.on{color:#89b4fa}
+.ib.red{color:#854040}
+.ib.red:hover{color:#f38ba8}
+.ib::after{content:attr(data-tip);position:absolute;bottom:115%;left:50%;transform:translateX(-50%);background:#0d0d18;color:#cdd6f4;font-size:10px;padding:2px 6px;border-radius:3px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .1s;border:1px solid #313244;z-index:200}
+.ib:hover::after{opacity:1}
+.hist-block{margin-top:6px;border-top:1px solid #313244;padding-top:6px}
+.hv-item{padding:5px 8px;border-radius:5px;border:1px solid #2a2a3a;margin-bottom:5px;cursor:pointer;transition:background .1s}
+.hv-item:hover,.hv-item.sel{background:#2a2a3a}
+.hv-hash{font-size:9px;font-family:monospace;color:#6c7086}
+.hv-text{font-size:12px;color:#bac2de;margin-top:3px;line-height:1.4}
+.hv-date{font-size:9px;color:#45475a;margin-top:2px}
+.hv-actions{display:flex;gap:5px;margin-top:4px}
+.player-bar{flex-shrink:0;background:#181825;border-top:1px solid #313244;padding:5px 14px;display:flex;align-items:center;gap:8px}
+.player-bar audio{flex:1;height:28px}
+.player-lbl{font-size:11px;color:#6c7086;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0}
+.empty{color:#6c7086;font-size:13px;padding:24px;text-align:center}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid #45475a;border-top-color:#89b4fa;border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-thumb{background:#45475a;border-radius:3px}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body x-data="reviewApp()" x-init="boot()">
+
+<div class="topbar">
+  <span style="font-weight:800;color:#89b4fa;font-size:13px;white-space:nowrap">&#x1F4DA; Review</span>
+  <input type="text" x-model="outputDir" placeholder="/path/to/book_output" @keydown.enter="loadChapters()">
+  <div class="topbar-right">
+    <button class="btn btn-primary" @click="loadChapters()" :disabled="loading">
+      <span x-show="loading" class="spin"></span>
+      <span x-text="loading ? 'Loading...' : 'Load'"></span>
+    </button>
+    <template x-if="currentChapter">
+      <button class="btn btn-green" @click="togglePlayAll()"
+              x-text="playingAll && !playingDisputed ? 'Stop' : 'Play All'"></button>
+    </template>
+    <template x-if="currentChapter && Object.keys(disputedMap).length > 0">
+      <button class="btn" style="background:#4a2535;color:#f38ba8;border:1px solid #6a3545"
+              @click="togglePlayDisputed()"
+              x-text="playingDisputed ? 'Stop Disputed' : '🔴 Play Disputed (' + Object.keys(disputedMap).length + ')'"></button>
+    </template>
+    <template x-if="currentChapter">
+      <button class="btn btn-primary" @click="synthesize()" :disabled="synthesizing"
+              x-text="synthesizing ? 'Synthesizing...' : 'Synthesize'"></button>
+    </template>
+    <span class="spill" :class="{err:statusErr}" x-text="statusMsg" x-show="statusMsg"></span>
+  </div>
+</div>
+
+<div class="layout">
+  <div class="sidebar">
+    <div class="sidebar-hdr">Chapters</div>
+    <div class="ch-list">
+      <template x-if="chapters.length === 0"><div class="empty">No chapters</div></template>
+      <template x-for="ch in chapters" :key="ch.key">
+        <div class="ch-item" :class="{active: currentChapter && currentChapter.key===ch.key}" @click="selectChapter(ch)">
+          <div class="ch-title" x-text="ch.title"></div>
+          <div class="ch-meta" x-text="sIcon(ch.audio_status) + ch.sentence_count + ' sentences'"></div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="chapter-bar" x-show="currentChapter">
+      <h2 x-text="currentChapter ? currentChapter.title : ''"></h2>
+    </div>
+
+    <div class="chunk-list">
+      <template x-if="!currentChapter"><div class="empty">&larr; Select a chapter</div></template>
+      <template x-if="chunksLoading"><div class="empty"><span class="spin"></span> Loading&hellip;</div></template>
+
+      <template x-for="(chunk, i) in chunks" :key="chunk.hash + '_' + i">
+        <div class="chunk-row"
+             :data-ci="i"
+             :class="{playing: playingIdx===i && !histPlaying, editing: editingIdx===i, 'hist-open': histChunk===i, disputed: isDisputed(chunk.hash) && disputeChunk!==i}">
+
+          <span class="cnum" x-text="i+1"></span>
+
+          <div class="cbody">
+            <template x-if="editingIdx !== i">
+              <div>
+                <div class="ctext" :class="{noaudio: !chunk.has_audio}" x-text="chunk.text"></div>
+                <template x-if="isDisputed(chunk.hash)"><span class="disputed-badge">⚠ disputed</span></template>
+                <div class="chash" x-text="chunk.hash.slice(0,8) + (!chunk.has_audio ? ' · no audio' : '')"></div>
+              </div>
+            </template>
+            <template x-if="editingIdx === i">
+              <div>
+                <div style="font-size:11px;color:#6c7086;margin-bottom:2px">Editing:</div>
+                <textarea class="edit-area" x-model="editText" @keydown.escape="cancelEdit()" rows="3"></textarea>
+                <div class="edit-row">
+                  <button class="btn btn-primary btn-sm" @click="saveEdit(i)">Save</button>
+                  <button class="btn btn-secondary btn-sm" @click="cancelEdit()">Cancel</button>
+                </div>
+              </div>
+            </template>
+
+            <template x-if="histChunk === i">
+              <div class="hist-block">
+                <!-- ...existing history block... -->
+                <template x-if="histEntries.length === 0">
+                  <div style="font-size:11px;color:#6c7086">No previous versions</div>
+                </template>
+                <template x-for="(hv, hi) in histEntries" :key="hv.hash">
+                  <div class="hv-item" :class="{sel: histSel===hi}" @click="selectHistEntry(i, hi)">
+                    <div class="hv-hash" x-text="hv.hash.slice(0,8) + ' to ' + (hv.replaced_by ? hv.replaced_by.slice(0,8) : 'deleted')"></div>
+                    <div class="hv-text" x-text="hv.text"></div>
+                    <div class="hv-date" x-text="hv.created_at"></div>
+                    <template x-if="histSel === hi">
+                      <div class="hv-actions">
+                        <button class="btn btn-green btn-sm" @click.stop="restoreHist(i, hi)">Restore</button>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="histSel >= 0 && histAudioSrc">
+                  <div style="margin-top:6px">
+                    <audio id="hist-audio" controls :src="histAudioSrc" style="width:100%;height:26px"
+                           @ended="onHistEnded()"></audio>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <template x-if="disputeChunk === i">
+              <div class="disputed-panel">
+                <div class="disp-sim" x-text="'similarity: ' + (disputedMap[chunk.hash]?.similarity?.toFixed(2) ?? '?')"></div>
+                <div style="font-size:10px;color:#6c7086;margin-bottom:2px">Whisper transcription:</div>
+                <div class="disp-transcription" x-text="disputedMap[chunk.hash]?.transcription ?? ''"></div>
+                <div style="margin-top:6px;display:flex;gap:5px">
+                  <button class="btn btn-sm" style="background:#3a2020;color:#f38ba8;border:1px solid #5a3030"
+                          @click="resolveDisputed(i)">Mark resolved</button>
+                  <button class="btn btn-secondary btn-sm" @click="disputeChunk=-1">Close</button>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <div class="cbtns">
+            <button class="ib" :class="{on: playingIdx===i && !histPlaying}"
+                    data-tip="Play" @click="playBtn(i)">&#9654;</button>
+            <button class="ib" :class="{on: histChunk===i}"
+                    data-tip="History" @click="toggleHist(i)">&#128220;</button>
+            <button class="ib" :class="{on: editingIdx===i}"
+                    data-tip="Edit" @click="startEdit(i)">&#9999;</button>
+            <template x-if="chunk.has_audio">
+              <button class="ib red"
+                      data-tip="Delete audio" @click="delAudio(i)">&#128263;</button>
+            </template>
+            <template x-if="isDisputed(chunk.hash)">
+              <button class="ib" :class="{on: disputeChunk===i}"
+                      data-tip="Disputed" @click="toggleDisputed(i)" style="color:#f38ba8">&#9888;</button>
+            </template>
+            <button class="ib red"
+                    data-tip="Delete" @click="delChunk(i)">&#128465;</button>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- Bottom player: always in DOM, driven imperatively so @ended fires reliably -->
+    <div class="player-bar" x-show="playerLbl">
+      <span class="player-lbl" x-text="playerLbl"></span>
+      <button class="btn btn-secondary btn-sm" @click="prevChunk()" title="Previous" style="flex-shrink:0">&#9664;</button>
+      <audio id="main-audio" controls style="flex:1;height:28px" @ended="onMainEnded()"></audio>
+      <button class="btn btn-secondary btn-sm" @click="nextChunk()" title="Next" style="flex-shrink:0">&#9654;</button>
+      <label style="flex-shrink:0;font-size:11px;color:#cdd6f4;display:flex;align-items:center;gap:4px;margin-left:6px">
+        &#9654;&#9654;
+        <select style="background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:4px;padding:1px 4px;font-size:12px"
+                @change="setPlaybackRate(parseFloat($event.target.value))"
+                :value="playbackRate">
+          <option value="0.75">0.75×</option>
+          <option value="1">1×</option>
+          <option value="1.25">1.25×</option>
+          <option value="1.5">1.5×</option>
+          <option value="1.75">1.75×</option>
+          <option value="2">2×</option>
+        </select>
+      </label>
+    </div>
+  </div>
+</div>
+
+<script>
+function reviewApp() {
+  return {
+    outputDir: '',
+    chapters: [],
+    currentChapter: null,
+    chunks: [],
+    loading: false,
+    chunksLoading: false,
+    statusMsg: '',
+    statusErr: false,
+    synthesizing: false,
+    // playback
+    playingIdx: -1,      // chunk currently highlighted as "playing"
+    lastPlayedIdx: -1,   // last chunk the user played (for Play All resume)
+    playingAll: false,
+    playingDisputed: false,
+    playAllIdx: -1,
+    playerLbl: '',
+    histPlaying: false,
+    // editing
+    editingIdx: -1,
+    editText: '',
+    // history
+    histChunk: -1,
+    histEntries: [],
+    histSel: -1,
+    // disputed
+    disputedMap: {},   // hash → {similarity, transcription, resolved}
+    disputeChunk: -1,  // index of chunk whose dispute panel is open
+    histAudioSrc: '',
+    playbackRate: 1.0,
+
+    /* ── Boot / persistence ── */
+    boot() {
+      const savedRate = parseFloat(localStorage.getItem('rev_playback_rate') || '1');
+      this.playbackRate = [0.75, 1, 1.25, 1.5, 1.75, 2].includes(savedRate) ? savedRate : 1;
+      const dir = localStorage.getItem('rev_dir');
+      if (dir) {
+        this.outputDir = dir;
+        this.$nextTick(() => this.loadChapters());
+      }
+    },
+
+    _savePos() {
+      if (this.currentChapter) {
+        localStorage.setItem('rev_chapter_key', this.currentChapter.key);
+        localStorage.setItem('rev_chunk_idx', String(this.lastPlayedIdx));
+      }
+    },
+
+    /* ── Helpers ── */
+    sIcon(s) {
+      return s === 'synthesized' ? '[ok] ' : s === 'partial' ? '[~] ' : '[..] ';
+    },
+    st(msg, err = false) { this.statusMsg = msg; this.statusErr = err; },
+
+    _url(hash) {
+      return '/api/audio?dir=' + encodeURIComponent(this.outputDir)
+        + '&chapter_key=' + encodeURIComponent(this.currentChapter.key)
+        + '&hash=' + hash + '&_t=' + Date.now();
+    },
+
+    // Retry finding a DOM element (Alpine x-if may need >1 tick to mount)
+    _waitEl(id, cb, tries) {
+      tries = tries || 0;
+      const el = document.getElementById(id);
+      if (el) { cb(el); return; }
+      if (tries < 15) setTimeout(() => this._waitEl(id, cb, tries + 1), 40);
+    },
+
+    _playMain(url, lbl) {
+      const el = document.getElementById('main-audio');
+      if (!el) return;
+      el.src = url;
+      el.playbackRate = this.playbackRate;
+      this.playerLbl = lbl;
+      el.play().catch(() => {});
+    },
+
+    _stopMain() {
+      const el = document.getElementById('main-audio');
+      if (el) { el.pause(); el.src = ''; }
+      this.playerLbl = '';
+      this.playingIdx = -1;
+      this.histPlaying = false;
+    },
+
+    setPlaybackRate(rate) {
+      this.playbackRate = rate;
+      localStorage.setItem('rev_playback_rate', String(rate));
+      const main = document.getElementById('main-audio');
+      if (main) main.playbackRate = rate;
+      const hist = document.getElementById('hist-audio');
+      if (hist) hist.playbackRate = rate;
+    },
+
+    /* ── Load chapters ── */
+    async loadChapters() {
+      if (!this.outputDir) return;
+      localStorage.setItem('rev_dir', this.outputDir);
+      this.loading = true;
+      this.st('Loading...');
+      this.chapters = [];
+      this.currentChapter = null;
+      this.chunks = [];
+      try {
+        const r = await fetch('/api/chapters?dir=' + encodeURIComponent(this.outputDir));
+        if (!r.ok) throw new Error(await r.text());
+        this.chapters = await r.json();
+        this.st(this.chapters.length + ' chapters');
+
+        // Restore saved chapter
+        const savedKey = localStorage.getItem('rev_chapter_key');
+        if (savedKey) {
+          const ch = this.chapters.find(c => c.key === savedKey);
+          if (ch) await this.selectChapter(ch);
+        }
+      } catch (e) {
+        this.st('Error: ' + e.message, true);
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async selectChapter(ch) {
+      this.stopPlayAll();
+      this.currentChapter = ch;
+      this.chunks = [];
+      this.editingIdx = -1;
+      this.histChunk = -1;
+      this.histEntries = [];
+      this.histSel = -1;
+      this.disputeChunk = -1;
+      this.disputedMap = {};
+      this._stopMain();
+      this.chunksLoading = true;
+      try {
+        const r = await fetch('/api/chunks?dir=' + encodeURIComponent(this.outputDir)
+          + '&chapter_key=' + encodeURIComponent(ch.key)
+          + '&text_path=' + encodeURIComponent(ch.text_path));
+        if (!r.ok) throw new Error(await r.text());
+        this.chunks = await r.json();
+        this.st(this.chunks.length + ' chunks');
+
+        // Load disputed chunks in the background
+        this._loadDisputed(ch.key).catch(() => {});
+
+        // Restore saved chunk position for this chapter
+        const savedKey = localStorage.getItem('rev_chapter_key');
+        const savedIdx = parseInt(localStorage.getItem('rev_chunk_idx') || '-1', 10);
+        if (savedKey === ch.key && savedIdx >= 0 && savedIdx < this.chunks.length) {
+          this.lastPlayedIdx = savedIdx;
+          this.st(this.chunks.length + ' chunks (position restored: #' + (savedIdx + 1) + ')');
+        } else {
+          this.lastPlayedIdx = -1;
+        }
+      } catch (e) {
+        this.st('Error: ' + e.message, true);
+      } finally {
+        this.chunksLoading = false;
+      }
+    },
+
+    async _loadDisputed(chapterKey) {
+      try {
+        const r = await fetch('/api/disputed?dir=' + encodeURIComponent(this.outputDir)
+          + '&chapter_key=' + encodeURIComponent(chapterKey));
+        if (!r.ok) return;
+        const rows = await r.json();
+        const m = {};
+        for (const row of rows) {
+          if (!row.resolved) m[row.hash] = row;
+        }
+        this.disputedMap = m;
+      } catch (_) {}
+    },
+
+    isDisputed(hash) {
+      return !!this.disputedMap[hash];
+    },
+
+    toggleDisputed(i) {
+      this.disputeChunk = (this.disputeChunk === i) ? -1 : i;
+    },
+
+    async resolveDisputed(i) {
+      const chunk = this.chunks[i];
+      if (!chunk) return;
+      try {
+        const r = await fetch('/api/disputed/resolve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dir: this.outputDir,
+            chapter_key: this.currentChapter.key,
+            hash: chunk.hash,
+          }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        const m = { ...this.disputedMap };
+        delete m[chunk.hash];
+        this.disputedMap = m;
+        this.disputeChunk = -1;
+        this.st('Resolved');
+      } catch (e) {
+        this.st('Error: ' + e.message, true);
+      }
+    },
+
+    /* ── Manual play ── */
+    playBtn(i) {
+      this.stopPlayAll();
+      const c = this.chunks[i];
+      if (!c.has_audio) { this.st('No audio for #' + (i + 1), true); return; }
+      this.playingIdx = i;
+      this.lastPlayedIdx = i;
+      this.histPlaying = false;
+      this._playMain(this._url(c.hash), '#' + (i + 1) + ' ' + c.text.slice(0, 50));
+      this._savePos();
+    },
+
+    onMainEnded() {
+      if (this.playingDisputed) {
+        // Find next disputed chunk after current
+        const disputedIdxs = this._disputedIndices();
+        const next = disputedIdxs.find(idx => idx > this.playAllIdx);
+        if (next !== undefined) {
+          this.playAllIdx = next;
+          this._playDisputedAt(next);
+        } else {
+          this.playingDisputed = false;
+          this.playingAll = false;
+          this.playingIdx = -1;
+          this.playerLbl = '';
+          this.st('🔴 All disputed chunks played');
+        }
+      } else if (this.playingAll) {
+        this.playAllIdx++;
+        this._playAllNext();
+      } else {
+        this.playingIdx = -1;
+        this.playerLbl = '';
+      }
+    },
+
+    /* ── Prev / Next ── */
+    prevChunk() {
+      const start = this.playingIdx > 0 ? this.playingIdx - 1 : 0;
+      for (let i = start; i >= 0; i--) {
+        if (this.chunks[i] && this.chunks[i].has_audio) { this.playBtn(i); return; }
+      }
+    },
+
+    nextChunk() {
+      const start = this.playingIdx >= 0 ? this.playingIdx + 1 : 0;
+      for (let i = start; i < this.chunks.length; i++) {
+        if (this.chunks[i] && this.chunks[i].has_audio) { this.playBtn(i); return; }
+      }
+    },
+
+    /* ── Play All ── */
+    togglePlayAll() {
+      if (this.playingAll && !this.playingDisputed) { this.stopPlayAll(); return; }
+      this.stopPlayAll();
+      this.playingAll = true;
+      this.playingDisputed = false;
+      // Resume from last played position (or from start)
+      this.playAllIdx = this.lastPlayedIdx >= 0 ? this.lastPlayedIdx : 0;
+      this._playAllNext();
+    },
+
+    stopPlayAll() {
+      this.playingAll = false;
+      this.playingDisputed = false;
+      this.playAllIdx = -1;
+      this.histPlaying = false;
+      this._stopMain();
+    },
+
+    /* ── Play Disputed ── */
+    _disputedIndices() {
+      return this.chunks
+        .map((c, i) => this.isDisputed(c.hash) ? i : -1)
+        .filter(i => i >= 0);
+    },
+
+    togglePlayDisputed() {
+      if (this.playingDisputed) { this.stopPlayAll(); return; }
+      this.stopPlayAll();
+      const idxs = this._disputedIndices();
+      if (!idxs.length) { this.st('No disputed chunks in this chapter', true); return; }
+      this.playingAll = true;
+      this.playingDisputed = true;
+      this.playAllIdx = idxs[0];
+      this._playDisputedAt(idxs[0]);
+    },
+
+    _playDisputedAt(i) {
+      const c = this.chunks[i];
+      if (!c) return;
+      this.$nextTick(() => {
+        const row = document.querySelector('[data-ci="' + i + '"]');
+        if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      });
+      if (c.has_audio) {
+        this.playingIdx = i;
+        this.lastPlayedIdx = i;
+        this._savePos();
+        this._playMain(this._url(c.hash), '🔴 #' + (i + 1) + ' ' + c.text.slice(0, 50));
+      } else {
+        // No audio — skip to next disputed
+        const idxs = this._disputedIndices();
+        const next = idxs.find(idx => idx > i);
+        if (next !== undefined) {
+          this.playAllIdx = next;
+          this._playDisputedAt(next);
+        } else {
+          this.playingDisputed = false;
+          this.playingAll = false;
+          this.st('🔴 All disputed chunks played');
+        }
+      }
+    },
+
+    async _playAllNext() {
+      if (!this.playingAll) return;
+
+      if (this.playAllIdx >= this.chunks.length) {
+        this.playingAll = false;
+        this.playingIdx = -1;
+        this.playerLbl = '';
+        this.st('Playback finished');
+        return;
+      }
+
+      const i = this.playAllIdx;
+      const c = this.chunks[i];
+
+      // Scroll into view
+      this.$nextTick(() => {
+        const row = document.querySelector('[data-ci="' + i + '"]');
+        if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      });
+
+      if (c.has_audio) {
+        // Close any auto-opened history panel
+        this.histChunk = -1;
+        this.histEntries = [];
+        this.histSel = -1;
+        this.histAudioSrc = '';
+        this.histPlaying = false;
+        this.playingIdx = i;
+        this.lastPlayedIdx = i;
+        this._savePos();
+        this._playMain(this._url(c.hash), '#' + (i + 1) + ' ' + c.text.slice(0, 50));
+
+      } else {
+        // No current audio — try history
+        const hist = await this._getHist(c.hash);
+        if (hist.length > 0) {
+          // Open history panel and play first entry
+          this.histChunk = i;
+          this.histEntries = hist;
+          this.histSel = 0;
+          this.histAudioSrc = this._url(hist[0].hash);
+          this.histPlaying = true;
+          this.playingIdx = i;
+          this.lastPlayedIdx = i;
+          this._savePos();
+          this.st('#' + (i + 1) + ' -> history ' + hist[0].hash.slice(0, 6));
+          // Wait for #hist-audio to mount (x-if may need multiple ticks)
+          this._waitEl('hist-audio', ha => {
+            ha.src = this.histAudioSrc;
+            ha.playbackRate = this.playbackRate;
+            ha.play().catch(() => {
+              // If play fails (e.g. audio not found), skip to next
+              this.histPlaying = false;
+              this.playAllIdx++;
+              this._playAllNext();
+            });
+          });
+        } else {
+          // No audio at all — skip
+          this.st('#' + (i + 1) + ' skipped (no audio)');
+          this.playAllIdx++;
+          setTimeout(() => this._playAllNext(), 0);
+        }
+      }
+    },
+
+    onHistEnded() {
+      if (this.playingAll && this.histPlaying) {
+        this.histPlaying = false;
+        this.playAllIdx++;
+        this._playAllNext();
+      }
+    },
+
+    async _getHist(hash) {
+      try {
+        const r = await fetch('/api/history?dir=' + encodeURIComponent(this.outputDir) + '&hash=' + hash);
+        return await r.json();
+      } catch (_) {
+        return [];
+      }
+    },
+
+    /* ── History panel ── */
+    async toggleHist(i) {
+      if (this.histChunk === i) {
+        this.histChunk = -1;
+        this.histEntries = [];
+        this.histSel = -1;
+        this.histAudioSrc = '';
+        return;
+      }
+      this.histChunk = i;
+      this.histSel = -1;
+      this.histAudioSrc = '';
+      this.histEntries = await this._getHist(this.chunks[i].hash);
+      if (!this.histEntries.length) this.st('No previous versions');
+    },
+
+    selectHistEntry(chunkIdx, hi) {
+      this.histSel = hi;
+      this.histAudioSrc = this._url(this.histEntries[hi].hash);
+      // Drive play() imperatively — reactive :src alone doesn't trigger playback
+      this._waitEl('hist-audio', ha => {
+        ha.src = this.histAudioSrc;
+        ha.playbackRate = this.playbackRate;
+        ha.play().catch(() => {});
+      });
+    },
+
+    async restoreHist(chunkIdx, hi) {
+      const hv = this.histEntries[hi];
+      const chunk = this.chunks[chunkIdx];
+      if (!confirm('Restore this version?\n\n' + hv.text.slice(0, 140))) return;
+      try {
+        const r = await fetch('/api/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dir: this.outputDir,
+            chapter_key: this.currentChapter.key,
+            text_path: this.currentChapter.text_path,
+            old_text: chunk.text,
+            new_text: hv.text,
+          }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        this.histChunk = -1;
+        this.histEntries = [];
+        this.histSel = -1;
+        this.st('Restored');
+        await this.selectChapter(this.currentChapter);
+      } catch (e) {
+        this.st('Error: ' + e.message, true);
+      }
+    },
+
+    /* ── Edit ── */
+    startEdit(i) {
+      if (this.editingIdx === i) { this.cancelEdit(); return; }
+      this.editingIdx = i;
+      this.editText = this.chunks[i].text;
+    },
+
+    cancelEdit() {
+      this.editingIdx = -1;
+      this.editText = '';
+    },
+
+    async saveEdit(i) {
+      const c = this.chunks[i];
+      if (this.editText === c.text) { this.cancelEdit(); return; }
+      try {
+        const r = await fetch('/api/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dir: this.outputDir,
+            chapter_key: this.currentChapter.key,
+            text_path: this.currentChapter.text_path,
+            old_text: c.text,
+            new_text: this.editText,
+          }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        this.cancelEdit();
+        this.st('Saved');
+        await this.selectChapter(this.currentChapter);
+      } catch (e) {
+        this.st('Error: ' + e.message, true);
+      }
+    },
+
+    /* ── Delete audio only ── */
+    async delAudio(i) {
+      const c = this.chunks[i];
+      if (!c.has_audio) return;
+      if (!confirm('Delete audio file for chunk ' + (i + 1) + '?\n\n' + c.text.slice(0, 100))) return;
+      try {
+        const r = await fetch('/api/delete_audio', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dir: this.outputDir,
+            chapter_key: this.currentChapter.key,
+            hash: c.hash,
+            text: c.text,
+          }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        this.st('Audio deleted for #' + (i + 1));
+        // Update has_audio flag locally without full reload
+        this.chunks[i] = { ...c, has_audio: false };
+        this.chunks = [...this.chunks];
+        const disputed = data.disputed || {
+          hash: c.hash,
+          original_text: c.text,
+          transcription: '[manual] audio deleted',
+          similarity: 0.0,
+          resolved: false,
+        };
+        this.disputedMap = { ...this.disputedMap, [c.hash]: disputed };
+        if (this.playingIdx === i) this._stopMain();
+      } catch (e) {
+        this.st('Error: ' + e.message, true);
+      }
+    },
+
+    /* ── Delete ── */
+    async delChunk(i) {
+      if (!confirm('Delete chunk ' + (i + 1) + '?\n\n' + this.chunks[i].text.slice(0, 100))) return;
+      try {
+        const r = await fetch('/api/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dir: this.outputDir,
+            chapter_key: this.currentChapter.key,
+            text_path: this.currentChapter.text_path,
+            text: this.chunks[i].text,
+          }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        this.st('Deleted #' + (i + 1));
+        await this.selectChapter(this.currentChapter);
+      } catch (e) {
+        this.st('Error: ' + e.message, true);
+      }
+    },
+
+    /* ── Synthesize ── */
+    async synthesize() {
+      if (!this.currentChapter) return;
+      this.synthesizing = true;
+      this.st('Synthesis started...');
+      try {
+        const r = await fetch(
+          '/api/synthesize?dir=' + encodeURIComponent(this.outputDir)
+          + '&chapter_key=' + encodeURIComponent(this.currentChapter.key)
+          + '&text_path=' + encodeURIComponent(this.currentChapter.text_path),
+          { method: 'POST' }
+        );
+        const d = await r.json();
+        this.st(d.status === 'already_running' ? 'Already running' : 'Running in background...');
+      } catch (e) {
+        this.st('Error: ' + e.message, true);
+      } finally {
+        setTimeout(() => { this.synthesizing = false; }, 3000);
+      }
+    },
+  };
+}
+</script>
+</body>
+</html>

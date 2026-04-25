@@ -10,13 +10,11 @@ def get_edge_config():
     args = MagicMock(
         input_file='../../../examples/The_Life_and_Adventures_of_Robinson_Crusoe.epub',
         output_folder='output',
-        preview=False,
         output_text=False,
         log='INFO',
         newline_mode='double',
         chapter_start=1,
         chapter_end=-1,
-        remove_endnotes=False,
         tts='edge',
         language='en-US',
         voice_name='en-US-GuyNeural',
