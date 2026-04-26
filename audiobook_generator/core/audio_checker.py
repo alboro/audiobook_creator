@@ -403,31 +403,27 @@ class AudioChecker:
 
         counters["checked"] += 1
 
-        disputed = sim < self.threshold
-        status = "DISPUTED" if disputed else "ok"
+        # Log disputed/ok for visibility; actual disputed status is computed
+        # dynamically in the Review UI by comparing similarity against the
+        # configured threshold — no static label is written to the DB.
+        status_label = "DISPUTED" if sim < self.threshold else "ok"
         logger.info(
             "  [%s] %s  sim=%.2f  %s | orig: %s",
-            chapter_key, sentence_hash[:10], sim, status, original_text[:60],
+            chapter_key, sentence_hash[:10], sim, status_label, original_text[:60],
         )
-        if disputed:
-            store.save_disputed_chunk(
-                chapter_key=chapter_key,
-                sentence_hash=sentence_hash,
-                original_text=original_text,
-                transcription=transcription,
-                similarity=sim,
-                raw_transcription=transcription,
-            )
+        if sim < self.threshold:
             counters["disputed"] += 1
-        else:
-            store.save_checked_chunk(
-                chapter_key=chapter_key,
-                sentence_hash=sentence_hash,
-                original_text=original_text,
-                transcription=transcription,
-                similarity=sim,
-                raw_transcription=transcription,
-            )
+
+        # Always persist the similarity score so the Review UI can dynamically
+        # re-classify entries when the threshold changes.
+        store.save_checked_chunk(
+            chapter_key=chapter_key,
+            sentence_hash=sentence_hash,
+            original_text=original_text,
+            transcription=transcription,
+            similarity=sim,
+            raw_transcription=transcription,
+        )
 
 
 # ---------------------------------------------------------------------------

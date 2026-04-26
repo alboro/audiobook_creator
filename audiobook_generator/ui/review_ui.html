@@ -90,6 +90,10 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
       <span x-show="loading" class="spin"></span>
       <span x-text="loading ? 'Loading...' : 'Load'"></span>
     </button>
+    <span style="display:flex;align-items:center;gap:3px;flex-shrink:0;font-size:11px;color:#6c7086"
+          title="Disputed threshold from config (audio_check_threshold)">
+      ⚠ <span style="color:#f38ba8" x-text="disputeThreshold"></span>
+    </span>
     <template x-if="currentChapter">
       <button class="btn btn-green" @click="togglePlayAll()"
               x-text="playingAll && !playingDisputed ? 'Stop' : 'Play All'"></button>
@@ -282,13 +286,34 @@ function reviewApp() {
     disputedMap: {},   // hash → {similarity, transcription, resolved}
     disputeChunk: -1,  // index of chunk whose dispute panel is open
     showOnlyDisputed: false,
+    disputeThreshold: 0.70,
     histAudioSrc: '',
     playbackRate: 1.0,
 
     /* ── Boot / persistence ── */
-    boot() {
+    async boot() {
       const savedRate = parseFloat(localStorage.getItem('rev_playback_rate') || '1');
       this.playbackRate = [0.75, 1, 1.25, 1.5, 1.75, 2].includes(savedRate) ? savedRate : 1;
+
+      // Threshold is always read from server INI config — no localStorage.
+      // Use $watch so that when disputeThreshold is updated (after fetch),
+      // the disputed map for the current chapter is automatically reloaded.
+      this.$watch('disputeThreshold', () => {
+        if (this.currentChapter) {
+          this._loadDisputed(this.currentChapter.key).catch(() => {});
+        }
+      });
+
+      try {
+        const r = await fetch('/api/settings');
+        if (r.ok) {
+          const s = await r.json();
+          if (typeof s.audio_check_threshold === 'number') {
+            this.disputeThreshold = s.audio_check_threshold;
+          }
+        }
+      } catch (e) { console.warn('[boot] /api/settings fetch failed:', e); }
+
       const dir = localStorage.getItem('rev_dir');
       if (dir) {
         this.outputDir = dir;
@@ -419,12 +444,15 @@ function reviewApp() {
     async _loadDisputed(chapterKey) {
       try {
         const r = await fetch('/api/disputed?dir=' + encodeURIComponent(this.outputDir)
-          + '&chapter_key=' + encodeURIComponent(chapterKey));
+          + '&chapter_key=' + encodeURIComponent(chapterKey)
+          + '&threshold=' + this.disputeThreshold);
         if (!r.ok) return;
         const rows = await r.json();
+        // Guard: ignore result if user navigated to a different chapter while fetching
+        if (!this.currentChapter || this.currentChapter.key !== chapterKey) return;
         const m = {};
         for (const row of rows) {
-          if (!row.resolved) m[row.hash] = row;
+          m[row.hash] = row;
         }
         this.disputedMap = m;
       } catch (_) {}

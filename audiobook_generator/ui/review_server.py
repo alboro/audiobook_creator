@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from audiobook_generator.config.ini_config_manager import load_merged_ini
 from audiobook_generator.core.audio_chunk_store import AudioChunkStore
 from audiobook_generator.ui.review_text_ops import apply_review_edit
 from audiobook_generator.utils.existing_chapters_loader import (
@@ -286,14 +287,41 @@ async def delete_sentence(req: DeleteRequest):
     return {"status": "ok", "deleted_hash": old_hash}
 
 
+@app.get("/api/settings")
+async def get_settings():
+    """Return server-side config values useful for the Review UI."""
+    cfg = getattr(app.state, "review_config", None)
+    threshold = getattr(cfg, "audio_check_threshold", None)
+    if threshold is None:
+        # Fall back to reading INI files directly (same priority chain as main.py)
+        try:
+            ini = load_merged_ini()
+            raw = ini.get("audio_check_threshold")
+            if raw is not None:
+                threshold = float(raw)
+        except Exception:
+            pass
+    if threshold is None:
+        threshold = 0.70
+    try:
+        threshold = float(threshold)
+    except (TypeError, ValueError):
+        threshold = 0.70
+    return {"audio_check_threshold": threshold}
+
+
 @app.get("/api/disputed")
-async def get_disputed(dir: str, chapter_key: str):
-    """Return disputed chunks (low transcription similarity) for a chapter."""
+async def get_disputed(dir: str, chapter_key: str, threshold: float = 0.70):
+    """Return chunks whose similarity falls below threshold (dynamic, no re-run needed).
+
+    *threshold* defaults to 0.70 but the Review UI passes the value the user
+    configured so results update instantly on threshold changes.
+    """
     db_path = _audio_db_path(dir)
     if not Path(db_path).exists():
         return []
     store = AudioChunkStore(db_path)
-    rows = store.get_disputed_chunks(chapter_key)
+    rows = store.get_disputed_chunks(chapter_key, threshold=threshold)
     return [
         {
             "hash": r["sentence_hash"],
@@ -302,7 +330,7 @@ async def get_disputed(dir: str, chapter_key: str):
             "similarity": r["similarity"],
             "checked_at": r["checked_at"],
             "status": r["status"],
-            "resolved": r["status"] == "resolved",
+            "resolved": False,  # resolved rows are excluded by the dynamic query
         }
         for r in rows
     ]
