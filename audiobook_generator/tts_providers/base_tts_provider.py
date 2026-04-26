@@ -1,6 +1,9 @@
 from typing import List
+import logging
 
 from audiobook_generator.config.general_config import GeneralConfig
+
+logger = logging.getLogger(__name__)
 
 TTS_AZURE = "azure"
 TTS_OPENAI = "openai"
@@ -39,13 +42,25 @@ class BaseTTSProvider:  # Base interface for TTS providers
 
         Controlled by ``tts_trailing_strip_chars`` config option (default: ``"."``).
         Pass an empty string to disable stripping.
+
+        If ``tts_log_text`` is enabled in config, logs the final text that will
+        be sent to the TTS service.
         """
         strip_chars = getattr(self.config, "tts_trailing_strip_chars", None)
         if strip_chars is None:
             strip_chars = "."
         if strip_chars:
-            return text.rstrip(strip_chars)
-        return text
+            result = text.rstrip(strip_chars)
+        else:
+            result = text
+        if getattr(self.config, "tts_log_text", False):
+            logger.info(
+                "TTS INPUT TEXT (%d chars):\n%s\n%s",
+                len(result),
+                "─" * 60,
+                result,
+            )
+        return result
 
 
 # Common support methods for all TTS providers

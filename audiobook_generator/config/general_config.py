@@ -44,6 +44,7 @@ class GeneralConfig:
         self.output_format = getattr(args, 'output_format', None)
         self.model_name = getattr(args, 'model_name', None)
         self.tts_trailing_strip_chars = getattr(args, 'tts_trailing_strip_chars', None)
+        self.tts_log_text = getattr(args, 'tts_log_text', False) or False
         _trim = getattr(args, 'tts_trim_silence', None)
         # Default is True; only explicitly setting "false" (string or bool) disables it.
         self.tts_trim_silence = str(_trim).lower() != 'false' if _trim is not None else True
