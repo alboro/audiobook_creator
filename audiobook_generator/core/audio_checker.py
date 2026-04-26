@@ -223,7 +223,15 @@ class AudioChecker:
         return checked_dt >= audio_mtime
 
     def _get_transcription(self, audio_file: Path, chapter_key: str, sentence_hash: str, store) -> str:
-        """Reuse cached raw transcription when possible, otherwise run Whisper."""
+        """Reuse cached raw transcription when possible, otherwise run Whisper.
+
+        Cache is considered valid when:
+          - a non-manual raw_transcription (or transcription) is stored, AND
+          - the cached entry is at least as recent as the audio file on disk.
+
+        If the audio file was re-synthesised after the last check, the cache is
+        stale and Whisper is re-run so the new audio is correctly evaluated.
+        """
         cache_row = store.get_cached_transcription_entry(chapter_key, sentence_hash)
         if cache_row:
             cached_raw = cache_row["raw_transcription"] or None
@@ -231,12 +239,17 @@ class AudioChecker:
                 legacy_transcription = (cache_row["transcription"] or "").strip()
                 if legacy_transcription and not legacy_transcription.startswith("[manual]"):
                     cached_raw = legacy_transcription
-            if cached_raw:
+            if cached_raw and self._is_cached_transcription_fresh(audio_file, cache_row["checked_at"]):
                 logger.debug(
                     "[%s] Hash %s – using cached transcription from chunk_cache",
                     chapter_key, sentence_hash[:10],
                 )
                 return cached_raw
+            elif cached_raw:
+                logger.debug(
+                    "[%s] Hash %s – cache stale (audio newer than last check), re-transcribing",
+                    chapter_key, sentence_hash[:10],
+                )
         return self._transcribe(audio_file)
 
     # ------------------------------------------------------------------

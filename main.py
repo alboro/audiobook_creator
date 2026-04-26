@@ -51,18 +51,18 @@ def handle_args():
     )
     parser.add_argument(
         "--audio_check_model",
-        default="small",
+        default=None,
         help="Whisper model size for --mode audio_check (default: small). Options: tiny, base, small, medium, large-v3.",
     )
     parser.add_argument(
         "--audio_check_threshold",
         type=float,
-        default=0.70,
+        default=None,
         help="Similarity threshold below which a chunk is marked disputed (default: 0.70).",
     )
     parser.add_argument(
         "--audio_check_device",
-        default="cpu",
+        default=None,
         help="Inference device for Whisper: cpu or cuda (default: cpu).",
     )
     parser.add_argument(
@@ -649,10 +649,10 @@ def _run_audio_check(config):
 
     checker = AudioChecker(
         output_folder=output_folder,
-        model_size=getattr(config, "audio_check_model", "small"),
+        model_size=getattr(config, "audio_check_model", None) or "small",
         language=getattr(config, "language", "ru"),
-        threshold=getattr(config, "audio_check_threshold", 0.70),
-        device=getattr(config, "audio_check_device", "cpu"),
+        threshold=getattr(config, "audio_check_threshold", None) or 0.70,
+        device=getattr(config, "audio_check_device", None) or "cpu",
         config=config,
     )
     checker.run(store)
