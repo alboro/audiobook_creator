@@ -270,6 +270,19 @@ class AudioChecker:
         from audiobook_generator.core.audio_chunk_store import AudioChunkStore
         assert isinstance(store, AudioChunkStore)
 
+        # Pre-flight: verify faster-whisper is importable before processing any files.
+        try:
+            import faster_whisper  # noqa: F401
+        except ImportError:
+            raise RuntimeError(
+                "faster-whisper is not installed or failed to import.\n"
+                "Install it with:\n"
+                "    pip install faster-whisper\n"
+                "On Windows you may also need the Microsoft Visual C++ 2019 Redistributable:\n"
+                "    https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
+                "If you use CUDA, make sure cuBLAS and cuDNN are available (see faster-whisper docs)."
+            )
+
         counters = {"checked": 0, "disputed": 0, "skipped": 0}
 
         # --- Text-first approach -------------------------------------------

@@ -22,3 +22,6 @@ ru-core-news-md==3.8.0
 # Optional: Gemini TTS provider (Google AI, supports Russian, 30+ voices)
 # google-genai>=1.0.0
 faster-whisper>=1.0.0
+# On Windows, faster-whisper requires the Microsoft Visual C++ 2019 Redistributable:
+#   https://aka.ms/vs/17/release/vc_redist.x64.exe
+# For GPU inference also install cuBLAS + cuDNN matching your CUDA version.
