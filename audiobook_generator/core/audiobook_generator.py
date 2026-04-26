@@ -736,9 +736,13 @@ class AudiobookGenerator:
                     text_for_tts=text_for_tts,
                     output_file=output_file,
                     audio_tags=audio_tags,
+                    synthesize_only=(getattr(self.config, 'mode', None) == 'audio_chunks'),
                 )
                 if success:
-                    logger.info("✅ Converted chapter %d (chunked): %s, output: %s", idx, title, output_file)
+                    if getattr(self.config, 'mode', None) == 'audio_chunks':
+                        logger.info("✅ Chunks ready for chapter %d (audio_chunks): %s", idx, title)
+                    else:
+                        logger.info("✅ Converted chapter %d (chunked): %s, output: %s", idx, title, output_file)
                 return success
 
             # --- Standard synthesis (whole chapter in one TTS call) ---
@@ -854,6 +858,13 @@ class AudiobookGenerator:
                     logger.info("Mode: audio ignores normalize=true; normalizers run only in prepare/all modes.")
                 self.config.normalize = False
                 logger.info("Mode: audio — synthesizing audio from text.")
+            elif mode == 'audio_chunks':
+                self.config.prepare_text = False
+                self.config.package_m4b = False
+                self.config.normalize = False
+                # force chunked mode — audio_chunks only makes sense with chunked synthesis
+                self.config.chunked_audio = True
+                logger.info("Mode: audio_chunks — synthesising chunk files only (no chapter merge).")
             elif mode == 'package':
                 self._run_package_only()
                 return
@@ -908,7 +919,7 @@ class AudiobookGenerator:
                                     )
                         else:
                             logger.info("Starting first run: text/%s", run_index)
-            elif mode == 'audio':
+            elif mode in ('audio', 'audio_chunks'):
                 # Use the same index as the latest text run.
                 latest_text = self._latest_run_index("text")
                 run_index = latest_text if latest_text else "001"
@@ -918,7 +929,7 @@ class AudiobookGenerator:
                     if os.path.isdir(auto_text_dir):
                         self.config.prepared_text_folder = auto_text_dir
                         self.config._prepared_text_folder_auto = True
-                        logger.info("Auto-detected text source for audio mode: %s", auto_text_dir)
+                        logger.info("Auto-detected text source for %s mode: %s", mode, auto_text_dir)
             else:
                 run_index = None  # legacy path, no structured layout
 
@@ -936,6 +947,14 @@ class AudiobookGenerator:
             if mode and run_index:
                 run_dir = self._text_run_dir() if mode in ('prepare', 'all') else self._wav_run_dir()
                 self._save_ini_snapshot(run_dir)
+
+            # Persist source book path so the Review UI can spawn re-synthesis jobs.
+            if mode and self.config.input_file:
+                _state_dir = Path(self.config.output_folder) / "_state"
+                _state_dir.mkdir(parents=True, exist_ok=True)
+                (_state_dir / "book_source.txt").write_text(
+                    str(Path(self.config.input_file).resolve()), encoding="utf-8"
+                )
 
             book_parser = get_book_parser(self.config)
             tts_provider = get_tts_provider(self.config)

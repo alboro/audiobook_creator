@@ -48,6 +48,15 @@ class GeneralConfig:
         _trim = getattr(args, 'tts_trim_silence', None)
         # Default is True; only explicitly setting "false" (string or bool) disables it.
         self.tts_trim_silence = str(_trim).lower() != 'false' if _trim is not None else True
+        # Smooth chunk joining: apply short fade-in/fade-out at chunk boundaries to eliminate
+        # crackling.  Default: True.  Disable for lowest-latency pure-concatenation.
+        _smooth = getattr(args, 'tts_chunk_smooth_join', None)
+        self.tts_chunk_smooth_join = str(_smooth).lower() != 'false' if _smooth is not None else True
+        _smooth_ms = getattr(args, 'tts_chunk_smooth_join_ms', None)
+        try:
+            self.tts_chunk_smooth_join_ms = int(_smooth_ms) if _smooth_ms is not None else 30
+        except (ValueError, TypeError):
+            self.tts_chunk_smooth_join_ms = 30
         self.openai_api_key = getattr(args, 'openai_api_key', None)
         self.openai_base_url = getattr(args, 'openai_base_url', None)
         self.openai_max_chars = getattr(args, 'openai_max_chars', None)

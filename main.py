@@ -34,16 +34,19 @@ def handle_args():
     )
     parser.add_argument(
         "--mode",
-        choices=["prepare", "audio", "package", "all", "audio_check"],
+        choices=["prepare", "audio", "audio_chunks", "package", "all", "audio_check"],
         required=True,
         help=(
             "Generation stage to run:\n"
-            "  prepare     — parse book, normalize text, write per-chapter .txt files for review;\n"
-            "  audio       — synthesize audio from per-chapter .txt (--prepared_text_folder) or raw book text;\n"
-            "  package     — package existing chapter audio files in output_folder into a single .m4b;\n"
-            "  all         — normalize + synthesize + package in one pass (full pipeline).\n"
-            "  audio_check — transcribe existing audio chunks locally with Whisper and mark\n"
-            "                mismatches as disputed in the DB for manual review."
+            "  prepare      — parse book, normalize text, write per-chapter .txt files for review;\n"
+            "  audio        — synthesize audio from per-chapter .txt (--prepared_text_folder) or raw book text;\n"
+            "                 when chunked_audio=true, skips re-merging chapters whose WAV is already up-to-date;\n"
+            "  audio_chunks — synthesise per-sentence chunk files only (no chapter merge).\n"
+            "                 Useful to synthesise first and merge with --mode audio afterwards;\n"
+            "  package      — package existing chapter audio files in output_folder into a single .m4b;\n"
+            "  all          — normalize + synthesize + package in one pass (full pipeline).\n"
+            "  audio_check  — transcribe existing audio chunks locally with Whisper and mark\n"
+            "                 mismatches as disputed in the DB for manual review."
         ),
     )
     parser.add_argument(

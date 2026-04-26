@@ -51,6 +51,8 @@ FIELD_SECTIONS: Dict[str, str] = {
     "instructions": "tts",
     "tts_trailing_strip_chars": "tts",
     "tts_trim_silence": "tts",
+    "tts_chunk_smooth_join": "tts",
+    "tts_chunk_smooth_join_ms": "tts",
     "tts_log_text": "tts",
     # [tts.openai] -------------------------------------------------------------
     "openai_api_key": "tts.openai",
@@ -145,7 +147,7 @@ BOOL_FIELDS = {
     "openai_enable_polling",
     "normalize_tsnorm_stress_yo", "normalize_tsnorm_stress_monosyllabic",
     "qwen_stream", "package_m4b", "chunked_audio",
-    "tts_log_text",
+    "tts_log_text", "tts_chunk_smooth_join",
 }
 
 

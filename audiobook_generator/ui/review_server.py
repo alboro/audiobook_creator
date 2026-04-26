@@ -328,18 +328,43 @@ async def resolve_disputed(req: ResolveDisputedRequest):
 _synthesis_threads: dict[str, threading.Thread] = {}
 
 
+def _read_book_source(output_dir: str) -> Optional[str]:
+    """Return the original book file path saved by AudiobookGenerator, or None."""
+    p = Path(output_dir) / "_state" / "book_source.txt"
+    if p.exists():
+        path = p.read_text(encoding="utf-8").strip()
+        if path:
+            return path
+    return None
+
+
 @app.post("/api/synthesize")
 async def synthesize(dir: str, chapter_key: str, text_path: str):
-    """Trigger background re-synthesis for a chapter."""
+    """Trigger background re-synthesis for missing audio chunks (--mode audio_chunks)."""
     key = f"{dir}:{chapter_key}"
     if key in _synthesis_threads and _synthesis_threads[key].is_alive():
         return {"status": "already_running"}
 
+    book_source = _read_book_source(dir)
+    if not book_source:
+        raise HTTPException(
+            400,
+            "Cannot determine source book file. "
+            "Run --mode prepare or --mode audio at least once so _state/book_source.txt is created.",
+        )
+
+    project_root = Path(__file__).parent.parent.parent
+
     def run():
-        print(f"[review_server] Synthesis started: {chapter_key}")
+        print(f"[review_server] audio_chunks synthesis started: {chapter_key}")
         try:
-            cmd = [".venv/bin/python", "main.py", "--mode", "audio", "--input_file", text_path]
-            subprocess.run(cmd, cwd=Path(__file__).parent.parent.parent)
+            cmd = [
+                ".venv/bin/python", "main.py",
+                book_source,
+                dir,
+                "--mode", "audio_chunks",
+            ]
+            subprocess.run(cmd, cwd=str(project_root))
         except Exception as e:
             print(f"[review_server] Synthesis error: {e}")
 

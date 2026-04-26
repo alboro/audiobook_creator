@@ -146,6 +146,148 @@ def split_sentences_with_voices(
     return result
 
 
+def _apply_boundary_fades(
+    data: bytes,
+    sampwidth: int,
+    nchannels: int,
+    fade_samples: int,
+    fade_in: bool,
+    fade_out: bool,
+) -> bytes:
+    """Apply linear fade-in / fade-out to raw PCM bytes at chunk boundaries.
+
+    Uses NumPy when available (fast), otherwise a pure-Python fallback.
+    Supports 8-, 16-, and 32-bit signed PCM (the most common WAV formats).
+    Returns the original *data* unchanged when the format is unsupported or
+    *fade_samples* ≤ 0.
+    """
+    if not (fade_in or fade_out) or fade_samples <= 0:
+        return data
+
+    try:
+        import numpy as np
+        dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
+        dtype = dtype_map.get(sampwidth)
+        if dtype is None:
+            return data
+        samples = np.frombuffer(data, dtype=dtype).copy()
+        n_frames = len(samples) // nchannels
+        actual = min(fade_samples, n_frames)
+        if actual <= 0:
+            return data
+        # Reshape to (frames, channels) for broadcasting
+        s2d = samples.reshape(n_frames, nchannels).astype(np.float32)
+        if fade_in:
+            ramp = np.linspace(0.0, 1.0, actual, dtype=np.float32)
+            s2d[:actual] *= ramp[:, np.newaxis]
+        if fade_out:
+            ramp = np.linspace(1.0, 0.0, actual, dtype=np.float32)
+            s2d[-actual:] *= ramp[:, np.newaxis]
+        info = np.iinfo(dtype)
+        return np.clip(s2d, info.min, info.max).astype(dtype).tobytes()
+    except ImportError:
+        pass
+
+    # ── Pure-Python fallback ──────────────────────────────────────────────────
+    import array as _arr
+    fmt_map = {1: 'b', 2: 'h', 4: 'i'}
+    fmt = fmt_map.get(sampwidth)
+    if fmt is None:
+        return data
+    samples = _arr.array(fmt, data)
+    n_frames = len(samples) // nchannels
+    actual = min(fade_samples, n_frames)
+    if actual <= 0:
+        return data
+    if fade_in:
+        for fi in range(actual):
+            factor = fi / actual
+            for ch in range(nchannels):
+                idx = fi * nchannels + ch
+                samples[idx] = int(samples[idx] * factor)
+    if fade_out:
+        for fi in range(actual):
+            factor = (actual - fi - 1) / actual
+            for ch in range(nchannels):
+                idx = (n_frames - actual + fi) * nchannels + ch
+                samples[idx] = int(samples[idx] * factor)
+    return samples.tobytes()
+
+
+def _merge_wav_files(chunk_paths: List[str], output_path: str, smooth_join_ms: int = 0) -> None:
+    """Fast WAV concatenation using Python's stdlib ``wave`` module (O(n)).
+
+    Optionally applies a short linear fade-out at the tail of each chunk and
+    a fade-in at the head of the next chunk (*smooth_join_ms* > 0) to
+    eliminate audible clicks / crackling at boundaries.
+    """
+    import wave
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    with wave.open(chunk_paths[0], 'rb') as first_w:
+        params = first_w.getparams()
+
+    fade_samples = int(params.framerate * smooth_join_ms / 1000) if smooth_join_ms > 0 else 0
+    n = len(chunk_paths)
+
+    with wave.open(output_path, 'wb') as out_w:
+        out_w.setnchannels(params.nchannels)
+        out_w.setsampwidth(params.sampwidth)
+        out_w.setframerate(params.framerate)
+
+        for i, path in enumerate(chunk_paths):
+            try:
+                with wave.open(path, 'rb') as w:
+                    data = w.readframes(w.getnframes())
+            except Exception as exc:
+                logger.warning("Skipping unreadable chunk %s: %s", path, exc)
+                continue
+
+            if fade_samples > 0:
+                data = _apply_boundary_fades(
+                    data,
+                    params.sampwidth,
+                    params.nchannels,
+                    fade_samples,
+                    fade_in=(i > 0),
+                    fade_out=(i < n - 1),
+                )
+            out_w.writeframes(data)
+
+    logger.debug(
+        "Merged %d WAV chunks into %s (smooth_join_ms=%d)",
+        n, output_path, smooth_join_ms,
+    )
+
+
+def _merge_via_pydub(chunk_paths: List[str], output_path: str, fmt: str, smooth_join_ms: int = 0) -> None:
+    """Merge non-WAV audio files using pydub with optional crossfade."""
+    try:
+        from pydub import AudioSegment  # type: ignore
+    except ImportError:
+        raise RuntimeError(
+            "pydub is required for non-WAV audio merging. "
+            "Install it with: pip install pydub"
+        )
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    combined = None
+    for path in chunk_paths:
+        seg = AudioSegment.from_file(path)
+        if combined is None:
+            combined = seg
+        elif smooth_join_ms > 0:
+            combined = combined.append(seg, crossfade=smooth_join_ms)
+        else:
+            combined += seg
+
+    if combined is not None:
+        combined.export(str(output_path), format=fmt)
+    logger.debug("Merged %d chunks via pydub into %s", len(chunk_paths), output_path)
+
+
 def _trim_trailing_silence(audio_path: str, tail_ms: int = SILENCE_TAIL_MS) -> None:
     """Trim trailing silence from *audio_path* in-place, keeping *tail_ms* ms after the last
     non-silent segment.
@@ -185,26 +327,22 @@ def _trim_trailing_silence(audio_path: str, tail_ms: int = SILENCE_TAIL_MS) -> N
         logger.debug("Silence trimming failed for %s: %s", audio_path, exc)
 
 
-def _merge_audio_files(chunk_paths: List[str], output_path: str) -> None:
-    """Concatenate audio chunk files into *output_path* using pydub."""
-    try:
-        from pydub import AudioSegment  # type: ignore
+def _merge_audio_files(chunk_paths: List[str], output_path: str, smooth_join_ms: int = 0) -> None:
+    """Concatenate audio chunk files into *output_path*.
 
-        combined: Optional[AudioSegment] = None
-        for path in chunk_paths:
-            seg = AudioSegment.from_file(path)
-            combined = seg if combined is None else combined + seg
-        if combined is not None:
-            out = Path(output_path)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            fmt = out.suffix.lstrip(".") or "mp3"
-            combined.export(str(out), format=fmt)
-        logger.debug("Merged %d chunks into %s", len(chunk_paths), output_path)
-    except ImportError:
-        raise RuntimeError(
-            "pydub is required for chunked audio merging. "
-            "Install it with: pip install pydub"
-        )
+    For WAV files uses Python's stdlib ``wave`` module (fast, O(n)).
+    For other formats falls back to pydub.
+
+    If *smooth_join_ms* > 0, a short linear fade-out / fade-in is applied at
+    each chunk boundary to eliminate audible clicks (no pydub needed for WAV).
+    """
+    if not chunk_paths:
+        return
+    fmt = Path(output_path).suffix.lstrip(".").lower() or "wav"
+    if fmt == "wav":
+        _merge_wav_files(chunk_paths, output_path, smooth_join_ms)
+    else:
+        _merge_via_pydub(chunk_paths, output_path, fmt, smooth_join_ms)
 
 
 class ChunkedAudioGenerator:
@@ -249,6 +387,22 @@ class ChunkedAudioGenerator:
         finally:
             self.config.voice_name = original
 
+    def _chapter_wav_is_uptodate(self, output_file: str, chunk_paths: List[str]) -> bool:
+        """Return True if *output_file* exists and is newer than every chunk in *chunk_paths*.
+
+        Used to skip redundant re-merges when the chapter WAV already reflects all
+        current chunks (e.g. after a previous successful run).
+        """
+        if not os.path.exists(output_file):
+            return False
+        wav_mtime = os.path.getmtime(output_file)
+        for cp in chunk_paths:
+            if not os.path.exists(cp):
+                return False
+            if os.path.getmtime(cp) > wav_mtime:
+                return False
+        return True
+
     def process_chapter(
         self,
         *,
@@ -257,6 +411,7 @@ class ChunkedAudioGenerator:
         text_for_tts: str,
         output_file: str,
         audio_tags: AudioTags,
+        synthesize_only: bool = False,
     ) -> bool:
         """Synthesise all sentences for *chapter_key*, then merge into *output_file*.
 
@@ -265,6 +420,11 @@ class ChunkedAudioGenerator:
 
         If ``config.voice_name2`` is set, quoted character-speech blocks are
         further split and synthesised with the secondary voice.
+
+        synthesize_only=True
+            Produce chunk files but skip the final merge step (useful for
+            ``--mode audio_chunks`` where you want to synthesise first and
+            merge later).
         """
         voice2 = getattr(self.config, 'voice_name2', None) or None
         sentence_voice_pairs = split_sentences_with_voices(
@@ -327,6 +487,13 @@ class ChunkedAudioGenerator:
                 "Chapter %d has %d synthesis errors; output may be incomplete.", chapter_idx, errors
             )
 
+        if synthesize_only:
+            logger.info(
+                "Chapter %d chunk synthesis complete (synthesize_only=True, merge skipped).",
+                chapter_idx,
+            )
+            return True
+
         # Collect synthesised chunk paths in sentence order (FS-based).
         chunk_paths = [
             self._chunk_path(chapter_key, _sentence_hash(s), v)
@@ -337,9 +504,21 @@ class ChunkedAudioGenerator:
             logger.error("Chapter %d: no audio chunks available for merging.", chapter_idx)
             return False
 
+        # Skip merge if the chapter WAV already reflects all current chunks.
+        if self._chapter_wav_is_uptodate(output_file, chunk_paths):
+            logger.info(
+                "Chapter %d WAV is up-to-date, skipping re-merge: %s", chapter_idx, output_file
+            )
+            return True
+
+        # Smooth join setting from config (default: 30 ms).
+        smooth_join_ms = 0
+        if getattr(self.config, "tts_chunk_smooth_join", True):
+            smooth_join_ms = int(getattr(self.config, "tts_chunk_smooth_join_ms", 30) or 30)
+
         # Merge chunks into the chapter output file.
         try:
-            _merge_audio_files(chunk_paths, output_file)
+            _merge_audio_files(chunk_paths, output_file, smooth_join_ms)
             logger.info("Chapter %d merged into %s", chapter_idx, output_file)
             return True
         except Exception as exc:
