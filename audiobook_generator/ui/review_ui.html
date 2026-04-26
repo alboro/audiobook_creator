@@ -49,6 +49,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-siz
 .ctext{font-size:13px;color:#cdd6f4;line-height:1.5;white-space:pre-wrap;word-break:break-word}
 .ctext.noaudio{color:#585870}
 .chash{font-size:9px;color:#45475a;font-family:monospace;margin-top:1px}
+a.chash{color:#585870;text-decoration:none;cursor:pointer}
+a.chash:hover{color:#89b4fa;text-decoration:underline}
 .edit-area{width:100%;background:#252538;color:#cdd6f4;border:1px solid #89b4fa;border-radius:4px;padding:6px 8px;font-size:13px;line-height:1.5;resize:vertical;min-height:60px;font-family:inherit;margin-top:4px}
 .edit-row{display:flex;gap:5px;margin-top:5px}
 .cbtns{display:flex;gap:2px;flex-shrink:0;padding-top:3px}
@@ -68,7 +70,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-siz
 .hv-actions{display:flex;gap:5px;margin-top:4px}
 .player-bar{flex-shrink:0;background:#181825;border-top:1px solid #313244;padding:5px 14px;display:flex;align-items:center;gap:8px}
 .player-bar audio{flex:1;height:28px}
-.player-lbl{font-size:11px;color:#6c7086;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0}
+.player-lbl{font-size:11px;color:#6c7086;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;cursor:pointer}
+.player-lbl:hover{color:#89b4fa}
 .empty{color:#6c7086;font-size:13px;padding:24px;text-align:center}
 .spin{display:inline-block;width:12px;height:12px;border:2px solid #45475a;border-top-color:#89b4fa;border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -91,10 +94,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-siz
       <button class="btn btn-green" @click="togglePlayAll()"
               x-text="playingAll && !playingDisputed ? 'Stop' : 'Play All'"></button>
     </template>
-    <template x-if="currentChapter && Object.keys(disputedMap).length > 0">
+    <template x-if="currentChapter && Object.keys(disputedMap).length > 0 && !showOnlyDisputed">
       <button class="btn" style="background:#4a2535;color:#f38ba8;border:1px solid #6a3545"
               @click="togglePlayDisputed()"
-              x-text="playingDisputed ? 'Stop Disputed' : '🔴 Play Disputed (' + Object.keys(disputedMap).length + ')'"></button>
+              x-text="'🔴 Play Disputed (' + Object.keys(disputedMap).length + ')'"></button>
+    </template>
+    <template x-if="showOnlyDisputed">
+      <button class="btn btn-secondary" @click="showAllChunks()">&#8592; Show All</button>
     </template>
     <template x-if="currentChapter">
       <button class="btn btn-primary" @click="synthesize()" :disabled="synthesizing"
@@ -129,6 +135,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-siz
 
       <template x-for="(chunk, i) in chunks" :key="chunk.hash + '_' + i">
         <div class="chunk-row"
+             x-show="!showOnlyDisputed || isDisputed(chunk.hash)"
              :data-ci="i"
              :class="{playing: playingIdx===i && !histPlaying, editing: editingIdx===i, 'hist-open': histChunk===i, disputed: isDisputed(chunk.hash) && disputeChunk!==i}">
 
@@ -139,7 +146,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-siz
               <div>
                 <div class="ctext" :class="{noaudio: !chunk.has_audio}" x-text="chunk.text"></div>
                 <template x-if="isDisputed(chunk.hash)"><span class="disputed-badge">⚠ disputed</span></template>
-                <div class="chash" x-text="chunk.hash.slice(0,8) + (!chunk.has_audio ? ' · no audio' : '')"></div>
+                <template x-if="chunk.has_audio">
+                  <a class="chash" :href="_url(chunk.hash)" download x-text="chunk.hash.slice(0,8)"></a>
+                </template>
+                <template x-if="!chunk.has_audio">
+                  <div class="chash" x-text="chunk.hash.slice(0,8) + ' · no audio'"></div>
+                </template>
               </div>
             </template>
             <template x-if="editingIdx === i">
@@ -218,7 +230,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-siz
 
     <!-- Bottom player: always in DOM, driven imperatively so @ended fires reliably -->
     <div class="player-bar" x-show="playerLbl">
-      <span class="player-lbl" x-text="playerLbl"></span>
+      <span class="player-lbl" x-text="playerLbl" @click="scrollToPlaying()" title="Click to scroll to chunk"></span>
       <button class="btn btn-secondary btn-sm" @click="prevChunk()" title="Previous" style="flex-shrink:0">&#9664;</button>
       <audio id="main-audio" controls style="flex:1;height:28px" @ended="onMainEnded()"></audio>
       <button class="btn btn-secondary btn-sm" @click="nextChunk()" title="Next" style="flex-shrink:0">&#9654;</button>
@@ -269,6 +281,7 @@ function reviewApp() {
     // disputed
     disputedMap: {},   // hash → {similarity, transcription, resolved}
     disputeChunk: -1,  // index of chunk whose dispute panel is open
+    showOnlyDisputed: false,
     histAudioSrc: '',
     playbackRate: 1.0,
 
@@ -487,6 +500,12 @@ function reviewApp() {
 
     /* ── Prev / Next ── */
     prevChunk() {
+      if (this.playingDisputed) {
+        const idxs = this._disputedIndices();
+        const pos = idxs.indexOf(this.playingIdx);
+        if (pos > 0) this._playDisputedAt(idxs[pos - 1]);
+        return;
+      }
       const start = this.playingIdx > 0 ? this.playingIdx - 1 : 0;
       for (let i = start; i >= 0; i--) {
         if (this.chunks[i] && this.chunks[i].has_audio) { this.playBtn(i); return; }
@@ -494,6 +513,12 @@ function reviewApp() {
     },
 
     nextChunk() {
+      if (this.playingDisputed) {
+        const idxs = this._disputedIndices();
+        const pos = idxs.indexOf(this.playingIdx);
+        if (pos >= 0 && pos < idxs.length - 1) this._playDisputedAt(idxs[pos + 1]);
+        return;
+      }
       const start = this.playingIdx >= 0 ? this.playingIdx + 1 : 0;
       for (let i = start; i < this.chunks.length; i++) {
         if (this.chunks[i] && this.chunks[i].has_audio) { this.playBtn(i); return; }
@@ -514,6 +539,7 @@ function reviewApp() {
     stopPlayAll() {
       this.playingAll = false;
       this.playingDisputed = false;
+      this.showOnlyDisputed = false;
       this.playAllIdx = -1;
       this.histPlaying = false;
       this._stopMain();
@@ -531,6 +557,7 @@ function reviewApp() {
       this.stopPlayAll();
       const idxs = this._disputedIndices();
       if (!idxs.length) { this.st('No disputed chunks in this chapter', true); return; }
+      this.showOnlyDisputed = true;
       this.playingAll = true;
       this.playingDisputed = true;
       this.playAllIdx = idxs[0];
@@ -691,11 +718,15 @@ function reviewApp() {
           }),
         });
         if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        const newHash = data.new_hash || hv.hash;
+        this.chunks[chunkIdx] = { ...chunk, text: hv.text, hash: newHash, has_audio: true };
+        this.chunks = [...this.chunks];
         this.histChunk = -1;
         this.histEntries = [];
         this.histSel = -1;
+        this.histAudioSrc = '';
         this.st('Restored');
-        await this.selectChapter(this.currentChapter);
       } catch (e) {
         this.st('Error: ' + e.message, true);
       }
@@ -729,9 +760,12 @@ function reviewApp() {
           }),
         });
         if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        const newHash = data.new_hash;
+        this.chunks[i] = { ...c, text: this.editText, hash: newHash, has_audio: false };
+        this.chunks = [...this.chunks];
         this.cancelEdit();
         this.st('Saved');
-        await this.selectChapter(this.currentChapter);
       } catch (e) {
         this.st('Error: ' + e.message, true);
       }
@@ -789,10 +823,25 @@ function reviewApp() {
         });
         if (!r.ok) throw new Error(await r.text());
         this.st('Deleted #' + (i + 1));
-        await this.selectChapter(this.currentChapter);
+        this.chunks.splice(i, 1);
+        this.chunks = [...this.chunks];
+        if (this.playingIdx === i) this._stopMain();
+        else if (this.playingIdx > i) this.playingIdx--;
       } catch (e) {
         this.st('Error: ' + e.message, true);
       }
+    },
+
+    /* ── Show All / Scroll ── */
+    showAllChunks() {
+      this.showOnlyDisputed = false;
+      this.stopPlayAll();
+    },
+
+    scrollToPlaying() {
+      if (this.playingIdx < 0) return;
+      const row = document.querySelector('[data-ci="' + this.playingIdx + '"]');
+      if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
     },
 
     /* ── Synthesize ── */
