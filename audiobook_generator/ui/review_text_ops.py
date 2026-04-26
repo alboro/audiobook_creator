@@ -42,15 +42,41 @@ def collapse_adjacent_duplicate_paragraphs(text: str) -> str:
     return result
 
 
+def _dedupe_horizontal_whitespace_at_edit_boundary(
+    before: str,
+    replacement: str,
+    after: str,
+) -> str:
+    """Avoid accidental double spaces introduced exactly at edit boundaries.
+
+    Review chunks are sentence-based, and the sentence splitter may keep the
+    leading space of the following sentence in ``after``. If the edited text
+    also ends with a space, a simple ``replace`` produces ``".  Next"``.
+
+    We only normalize horizontal whitespace at the two join points:
+    ``before|replacement`` and ``replacement|after``. Internal spacing inside
+    the replacement text is left untouched.
+    """
+    if before and replacement and before[-1] in " \t" and replacement[:1] in {" ", "\t"}:
+        replacement = replacement.lstrip(" \t")
+    if replacement and after and replacement[-1] in " \t" and after[:1] in {" ", "\t"}:
+        replacement = replacement.rstrip(" \t")
+    return before + replacement + after
+
+
 def apply_review_edit(full_text: str, old_text: str, new_text: str) -> str:
     """Apply one review edit safely to a chapter text.
 
     Replaces the first occurrence of ``old_text`` with ``new_text`` and then
     removes accidental adjacent duplicate paragraphs.
     """
-    if old_text not in full_text:
+    start = full_text.find(old_text)
+    if start < 0:
         raise ValueError("Original text not found in file (may have been modified)")
 
-    updated = full_text.replace(old_text, new_text, 1)
+    end = start + len(old_text)
+    before = full_text[:start]
+    after = full_text[end:]
+    updated = _dedupe_horizontal_whitespace_at_edit_boundary(before, new_text, after)
     return collapse_adjacent_duplicate_paragraphs(updated)
 

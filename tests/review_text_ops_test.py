@@ -11,33 +11,17 @@ from audiobook_generator.ui.review_text_ops import (
 
 
 OLD_PARAGRAPH = (
-    "Одно это соображение покажет, что доктрина искупления основана на чисто денежном представлении, "
-    "соответствующем представлению о долге, который мог бы уплатить другой человек. "
-    "А поскольку это денежное представление, в свою очередь, соответствует системе вторичных искуплений, "
-    "получаемых посредством денег, отдаваемых церкви за прощение,. то вероятнее всего одни и те же люди "
-    "выдумали и ту и другую из этих теорий. И что в действительности никакого искупления не существует; "
-    "что это басня. И что человек находится в том же относительном положении к своему Созда́телю, в каком "
-    "он находился всегда, с тех пор как существует человек. И что думать так - величайшее для него утешение."
+    "One paragraph can be corrected by the review UI. "
+    "This original version contains a punctuation bug, and it should be replaced."
 )
 
 NEW_PARAGRAPH = (
-    "Одно это соображение покажет, что доктрина искупления основана на чисто денежном представлении, "
-    "соответствующем представлению о долге, который мог бы уплатить другой человек. "
-    "А поскольку это денежное представление, в свою очередь, соответствует системе вторичных искуплений, "
-    "получаемых посредством денег, отдаваемых церкви за прощение. То вероятнее всего одни и те же люди "
-    "выдумали и ту и другую из этих теорий. И что в действительности никакого искупления не существует; "
-    "что это басня. И что человек находится в том же относительном положении к своему Созда́телю, в каком "
-    "он находился всегда, с тех пор как существует человек. И что думать так - величайшее для него утешение."
+    "One paragraph can be corrected by the review UI. "
+    "This corrected version fixes the punctuation bug and replaces the original."
 )
 
-PREV_PARAGRAPH = (
-    "Ибо внутреннее свидетельство состоит в том, что теория или доктрина искупления имеет своим основанием "
-    "представление о денежной справедливости. А не о нравственной справедливости."
-)
-
-NEXT_PARAGRAPH = (
-    "Пусть он верит в это, и он будет жить более последовательно и нравственно, чем при всякой иной системе."
-)
+PREV_PARAGRAPH = "The previous paragraph stays untouched."
+NEXT_PARAGRAPH = "The next paragraph also stays untouched."
 
 
 def test_collapse_adjacent_duplicate_paragraphs_removes_exact_neighbor_duplicate():
@@ -53,10 +37,9 @@ def test_collapse_adjacent_duplicate_paragraphs_removes_exact_neighbor_duplicate
 
     result = collapse_adjacent_duplicate_paragraphs(text)
 
-    assert result.count("Одно это соображение покажет") == 1
+    assert result.count(NEW_PARAGRAPH) == 1
     assert PREV_PARAGRAPH in result
     assert NEXT_PARAGRAPH in result
-
 
 
 def test_apply_review_edit_collapses_accidental_duplicate_in_new_text():
@@ -65,10 +48,9 @@ def test_apply_review_edit_collapses_accidental_duplicate_in_new_text():
 
     result = apply_review_edit(full_text, OLD_PARAGRAPH, accidentally_duplicated_new_text)
 
-    assert result.count("Одно это соображение покажет") == 1
+    assert result.count(NEW_PARAGRAPH) == 1
     assert OLD_PARAGRAPH not in result
     assert NEW_PARAGRAPH in result
-
 
 
 def test_apply_review_edit_regular_single_replace_still_works():
@@ -76,7 +58,26 @@ def test_apply_review_edit_regular_single_replace_still_works():
 
     result = apply_review_edit(full_text, OLD_PARAGRAPH, NEW_PARAGRAPH)
 
-    assert result.count("Одно это соображение покажет") == 1
+    assert result.count(NEW_PARAGRAPH) == 1
     assert OLD_PARAGRAPH not in result
     assert NEW_PARAGRAPH in result
 
+
+def test_apply_review_edit_dedupes_double_space_after_replacement_boundary():
+    full_text = "First sentence. Second sentence."
+    old_text = "First sentence."
+    new_text = "First sentence. "
+
+    result = apply_review_edit(full_text, old_text, new_text)
+
+    assert result == "First sentence. Second sentence."
+
+
+def test_apply_review_edit_dedupes_double_space_before_replacement_boundary():
+    full_text = "First sentence. Second sentence."
+    old_text = "Second sentence."
+    new_text = " Second corrected sentence."
+
+    result = apply_review_edit(full_text, old_text, new_text)
+
+    assert result == "First sentence. Second corrected sentence."
