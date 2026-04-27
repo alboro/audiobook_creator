@@ -98,13 +98,30 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
       <button class="btn btn-green" @click="togglePlayAll()"
               x-text="playlist.mode === 'all' ? 'Stop' : 'Play All'"></button>
     </template>
+    <!-- "Play Disputed" + "Filter" tab — shown when NOT already in disputed view -->
     <template x-if="currentChapter && Object.keys(disputedMap).length > 0 && !showOnlyDisputed">
       <button class="btn" style="background:#4a2535;color:#f38ba8;border:1px solid #6a3545"
               @click="togglePlayDisputed()"
               x-text="'🔴 Play Disputed (' + Object.keys(disputedMap).length + ')'"></button>
     </template>
+    <template x-if="currentChapter && Object.keys(disputedMap).length > 0 && !showOnlyDisputed">
+      <button class="btn btn-secondary" title="Show disputed only without autoplay"
+              @click="showDisputedFilter()">⚠ Filter</button>
+    </template>
+    <!-- Controls inside disputed filter view -->
+    <!-- ⏹ Stop auto-advance (stay in filter) -->
+    <template x-if="showOnlyDisputed && playlist.mode === 'disputed'">
+      <button class="btn btn-secondary" title="Stop auto-play, stay in disputed view"
+              @click="stopAutoPlay()">⏹ Stop</button>
+    </template>
+    <!-- ▶ Play — start auto-playing while already in disputed filter -->
+    <template x-if="showOnlyDisputed && playlist.mode !== 'disputed'">
+      <button class="btn" style="background:#4a2535;color:#f38ba8;border:1px solid #6a3545"
+              @click="startDisputedPlayback()">&#9654; Play</button>
+    </template>
+    <!-- ← Show All — exits disputed filter entirely -->
     <template x-if="showOnlyDisputed">
-      <button class="btn btn-secondary" @click="showAllChunks()">&#8592; Show All</button>
+      <button class="btn btn-secondary" @click="exitDisputedFilter()">&#8592; Show All</button>
     </template>
     <template x-if="currentChapter">
       <button class="btn btn-primary" @click="synthesize()" :disabled="synthesizing"
@@ -211,8 +228,10 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
           </div>
 
           <div class="cbtns">
-            <button class="ib" :class="{on: playingIdx===i && !histPlaying}"
-                    data-tip="Play" @click="playBtn(i)">&#9654;</button>
+            <button class="ib" :class="{on: playingIdx===i && !histPlaying && !audioPaused}"
+                    :data-tip="(playingIdx===i && !histPlaying && !audioPaused) ? 'Pause' : 'Play'"
+                    @click="playBtn(i)"
+                    x-text="(playingIdx===i && !histPlaying && !audioPaused) ? '⏸' : '▶'"></button>
             <button class="ib" :class="{on: histChunk===i}"
                     data-tip="History" @click="toggleHist(i)">&#128220;</button>
             <button class="ib" :class="{on: editingIdx===i}"
@@ -277,6 +296,7 @@ function reviewApp() {
     playlist: { mode: null, indices: [], pos: -1 },
     playerLbl: '',
     histPlaying: false,
+    audioPaused: false,      // true while main audio is paused (not stopped)
     // editing
     editingIdx: -1,
     editText: '',
@@ -351,6 +371,7 @@ function reviewApp() {
     },
 
     _playMain(url, lbl) {
+      this.audioPaused = false;
       const el = document.getElementById('main-audio');
       if (!el) return;
       el.src = url;
@@ -365,6 +386,7 @@ function reviewApp() {
       this.playerLbl = '';
       this.playingIdx = -1;
       this.histPlaying = false;
+      this.audioPaused = false;
     },
 
     setPlaybackRate(rate) {
@@ -608,6 +630,21 @@ function reviewApp() {
     playBtn(i) {
       const c = this.chunks[i];
       if (!c.has_audio) { this.st('No audio for #' + (i + 1), true); return; }
+
+      // Toggle pause / resume when clicking the already-active chunk.
+      if (this.playingIdx === i && !this.histPlaying) {
+        const el = document.getElementById('main-audio');
+        if (el) {
+          if (el.paused) {
+            el.play().catch(() => {});
+            this.audioPaused = false;
+          } else {
+            el.pause();
+            this.audioPaused = true;
+          }
+        }
+        return;
+      }
 
       // If a playlist is active and the clicked chunk is in it, jump within
       // the playlist WITHOUT changing the mode or filter.
@@ -856,6 +893,35 @@ function reviewApp() {
     showAllChunks() {
       this.showOnlyDisputed = false;
       this.stopPlayAll();
+    },
+
+    // Open the disputed-only view without starting autoplay.
+    showDisputedFilter() {
+      this._stopPlaylist();               // stop any current playlist
+      this.showOnlyDisputed = true;       // activate filter (playlist stays null)
+    },
+
+    // Stop auto-advance but KEEP the disputed filter visible.
+    stopAutoPlay() {
+      this.playlist = { mode: null, indices: [], pos: -1 };
+      const el = document.getElementById('main-audio');
+      if (el) { el.pause(); el.src = ''; }
+      this.playerLbl = '';
+      this.playingIdx = -1;
+      this.histPlaying = false;
+      this.audioPaused = false;
+      // showOnlyDisputed intentionally left unchanged
+    },
+
+    // Exit the disputed filter entirely (and stop everything).
+    exitDisputedFilter() {
+      this.showOnlyDisputed = false;
+      this.stopPlayAll();
+    },
+
+    // Start autoplay through disputed list while already inside the filter view.
+    startDisputedPlayback() {
+      this._startPlaylist('disputed');
     },
 
     scrollToPlaying() {
