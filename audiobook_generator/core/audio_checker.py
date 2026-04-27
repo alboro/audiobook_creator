@@ -392,12 +392,19 @@ class AudioChecker:
         orig_norm = _normalize_for_compare(original_text)
         trans_norm = _normalize_for_compare(transcription)
 
-        # Apply pre-compare semantic normalisation (expand abbreviations, numbers, etc.)
-        # to the original text so it matches the spoken form that Whisper transcribed.
+        # Apply pre-compare semantic normalisation (expand abbreviations, numbers, dates …)
+        # to BOTH texts so they end up in the same spoken-word form before comparison.
+        #
+        # Why both?  Whisper consistently transcribes spoken numbers back to digit form
+        # ("тысяча семьсот девяносто четвёртого" → "1794").  _normalize_for_compare then
+        # strips those digits, leaving e.g. "августа года" while orig_norm still contains
+        # "тысяча семьсот девяносто четвёртого" — similarity collapses.
+        # Applying the same ru_numbers / ru_abbreviations chain to the transcription
+        # converts Whisper's "5 августа 1794 года" back to the fully-spelled form so both
+        # sides are comparable on equal footing.
         if self._pre_compare is not None:
             orig_norm = _normalize_for_compare(self._pre_compare(original_text))
-            # Also normalize the transcription through simple_symbols to clean punctuation.
-            trans_norm = _normalize_for_compare(transcription)
+            trans_norm = _normalize_for_compare(self._pre_compare(transcription))
 
         sim = _similarity(orig_norm, trans_norm)
 
