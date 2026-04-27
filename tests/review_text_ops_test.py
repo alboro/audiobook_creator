@@ -81,3 +81,68 @@ def test_apply_review_edit_dedupes_double_space_before_replacement_boundary():
     result = apply_review_edit(full_text, old_text, new_text)
 
     assert result == "First sentence. Second corrected sentence."
+
+
+# ---------------------------------------------------------------------------
+# Fuzzy-match: closing quote stranded before terminal punctuation
+# ---------------------------------------------------------------------------
+
+def test_apply_review_edit_closing_quote_before_period_is_found():
+    """File has '…не можем".' but chunk text (old_text) has '…не можем.'"""
+    full_text = (
+        "Лежит в основе многих преданий первых одиннадцати глав этой книги, "
+        'но надеяться восстановить его мы не можем".\n'
+    )
+    old_text = (
+        "Лежит в основе многих преданий первых одиннадцати глав этой книги, "
+        "но надеяться восстановить его мы не можем."
+    )
+    new_text = (
+        "Лежит в основе многих преданий первых одиннадцати глав этой книги,"
+        "[chunk_eof] но надеяться восстановить его мы не можем."
+    )
+
+    result = apply_review_edit(full_text, old_text, new_text)
+
+    assert "[chunk_eof]" in result
+    # The closing quote must be preserved in the output
+    assert '".' in result
+    assert "не можем" in result
+
+
+def test_apply_review_edit_closing_quote_preserved_after_fuzzy_replace():
+    """Verify the closing quote ends up before the terminal period in the result."""
+    full_text = 'Он сказал: «Прощай».\n'
+    old_text = 'Он сказал: «Прощай».'
+    new_text = 'Он сказал: «До свидания».'
+
+    # Exact match should work here (same closing chars) — sanity check
+    result = apply_review_edit(full_text, old_text, new_text)
+    assert 'До свидания' in result
+
+
+def test_apply_review_edit_fuzzy_preserves_closing_guillemet_before_period():
+    """File: 'текст".' — chunk old_text: 'текст.' — quote must survive edit."""
+    full_text = 'Первый абзац.\n\nтекст".\n\nПоследний абзац.\n'
+    old_text = 'текст.'
+    new_text = 'новый текст.'
+
+    result = apply_review_edit(full_text, old_text, new_text)
+
+    assert 'новый текст".' in result
+    assert 'Первый абзац.' in result
+    assert 'Последний абзац.' in result
+
+
+def test_apply_review_edit_exact_match_not_broken_by_fuzzy():
+    """When exact match exists it must still be used (no regression)."""
+    full_text = "Раз. Два. Три."
+    old_text = "Два."
+    new_text = "2."
+
+    result = apply_review_edit(full_text, old_text, new_text)
+
+    assert result == "Раз. 2. Три."
+
+
+

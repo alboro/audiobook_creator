@@ -190,8 +190,6 @@ async def save_edit(req: SaveEditRequest):
     new_hash = _sentence_hash(req.new_text)
 
     full_text = text_file.read_text(encoding="utf-8")
-    if req.old_text not in full_text:
-        raise HTTPException(400, "Original text not found in file (may have been modified)")
 
     try:
         new_full_text = apply_review_edit(full_text, req.old_text, req.new_text)
