@@ -10,6 +10,7 @@ import requests
 
 from audiobook_generator.core.audio_tags import AudioTags
 from audiobook_generator.config.general_config import GeneralConfig
+from audiobook_generator.utils.chunk_boundaries import split_text_on_explicit_chunk_boundaries
 from audiobook_generator.utils.utils import split_text, set_audio_tags, merge_audio_segments
 from audiobook_generator.tts_providers.base_tts_provider import BaseTTSProvider
 
@@ -86,7 +87,10 @@ class OpenAITTSProvider(BaseTTSProvider):
 
     def text_to_speech(self, text: str, output_file: str, audio_tags: AudioTags):
         max_chars = self.config.openai_max_chars
-        text_chunks = [text] if max_chars is not None and max_chars <= 0 else split_text(text, max_chars, self.config.language)
+        if max_chars is not None and max_chars <= 0:
+            text_chunks = split_text_on_explicit_chunk_boundaries(text, min_chars=1)
+        else:
+            text_chunks = split_text(text, max_chars, self.config.language)
 
         audio_segments = []
         chunk_ids = []

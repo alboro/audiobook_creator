@@ -10,6 +10,7 @@ from audiobook_generator.core.chunked_audio_generator import (
     split_sentences_with_voices,
     split_into_sentences,
 )
+from audiobook_generator.utils.chunk_boundaries import CHUNK_EOF_TAG
 from audiobook_generator.utils.existing_chapters_loader import split_text_into_chunks
 
 
@@ -145,6 +146,16 @@ class TestSplitTextIntoChunks:
         chunks = split_text_into_chunks("Первое предложение. Второе предложение.", "ru")
         assert len(chunks) >= 1  # sentencex may or may not split — just no crash
 
+    def test_chunk_eof_splits_without_reaching_display_text(self):
+        chunks = split_text_into_chunks(f"Первая часть{CHUNK_EOF_TAG} Вторая часть.", "ru")
+        assert chunks == ["Первая часть", "Вторая часть."]
+
+
+class TestSplitIntoSentencesChunkEof:
+    def test_chunk_eof_is_boundary_and_removed(self):
+        sentences = split_into_sentences(f"Первая часть{CHUNK_EOF_TAG} Вторая часть.", "ru")
+        assert sentences == ["Первая часть", "Вторая часть."]
+
 
 if __name__ == "__main__":
     # Quick smoke-run
@@ -152,5 +163,4 @@ if __name__ == "__main__":
     print(f"Chunks ({len(chunks)}):")
     for i, c in enumerate(chunks, 1):
         print(f"  {i}. {c}")
-
 

@@ -6,9 +6,12 @@ import io
 from pydub import AudioSegment
 from mutagen.id3._frames import TIT2, TPE1, TALB, TRCK
 from mutagen.id3 import ID3, ID3NoHeaderError
-from typing import List
-from sentencex import segment
-import os
+
+from audiobook_generator.utils.chunk_boundaries import (
+    split_text_on_explicit_chunk_boundaries,
+    split_text_by_chunk_boundaries,
+    strip_chunk_boundary_tags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +34,19 @@ def split_text(text: str, max_chars: int, language: str) -> List[str]:
     if max_chars <= 0:
         raise ValueError("max_chars must be positive")
     
-    # Use sentencex to get all sentences
-    sentences = list(segment(language, text))
-    
+    explicit_parts = split_text_on_explicit_chunk_boundaries(text, min_chars=1)
+    if len(explicit_parts) > 1:
+        chunks: List[str] = []
+        for part in explicit_parts:
+            chunks.extend(_split_text_by_size(part, max_chars, language))
+        return chunks
+
+    return _split_text_by_size(text, max_chars, language)
+
+
+def _split_text_by_size(text: str, max_chars: int, language: str) -> List[str]:
+    sentences = split_text_by_chunk_boundaries(text, language)
+
     chunks = []
     current_chunk = ""
     
@@ -47,7 +60,7 @@ def split_text(text: str, max_chars: int, language: str) -> List[str]:
         elif len(sentence) > max_chars:
             # Add the current chunk if it's not empty
             if current_chunk:
-                chunks.append(current_chunk)
+                chunks.append(strip_chunk_boundary_tags(current_chunk))
                 current_chunk = ""
             
             # Split the long sentence
@@ -61,7 +74,7 @@ def split_text(text: str, max_chars: int, language: str) -> List[str]:
         # Otherwise, start a new chunk with this sentence
         else:
             if current_chunk:
-                chunks.append(current_chunk)
+                chunks.append(strip_chunk_boundary_tags(current_chunk))
             current_chunk = sentence
     
     # Add the last chunk if it's not empty
@@ -80,7 +93,7 @@ def split_text(text: str, max_chars: int, language: str) -> List[str]:
     # # The lengths should be the same
     # assert len(chunks_sans_whitespace) == len(original_sans_whitespace), "Content might be lost during splitting"
     
-    return chunks
+    return [strip_chunk_boundary_tags(chunk) for chunk in chunks if strip_chunk_boundary_tags(chunk)]
 
 def split_long_sentence(sentence: str, max_chars: int) -> List[str]:
     """
@@ -140,7 +153,7 @@ def split_long_sentence(sentence: str, max_chars: int) -> List[str]:
         if best_split_idx == -1:
             best_split_idx = max_chars
         
-        parts.append(remaining[:best_split_idx])
+        parts.append(strip_chunk_boundary_tags(remaining[:best_split_idx]))
         remaining = remaining[best_split_idx:]
     
     return parts

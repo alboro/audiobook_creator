@@ -1,6 +1,7 @@
 import unittest
 import logging
 from audiobook_generator.utils.utils import split_text
+from audiobook_generator.utils.chunk_boundaries import CHUNK_EOF_TAG
 
 # Configure logging to display logs during test execution
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -25,6 +26,12 @@ class TestSplitText(unittest.TestCase):
         
         # The lengths should be the same
         assert len(chunks_sans_whitespace) == len(original_sans_whitespace), "Content might be lost during splitting"
+
+    def test_chunk_eof_forces_boundary_and_is_not_spoken(self):
+        text = f"Первая часть{CHUNK_EOF_TAG} Вторая часть."
+        chunks = split_text(text, 1000, "ru")
+        assert chunks == ["Первая часть", "Вторая часть."]
+        assert all(CHUNK_EOF_TAG not in chunk for chunk in chunks)
         
 
 if __name__ == "__main__":

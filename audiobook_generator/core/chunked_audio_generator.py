@@ -31,6 +31,7 @@ from typing import List, Optional, Tuple
 
 from audiobook_generator.core.audio_chunk_store import AudioChunkStore
 from audiobook_generator.core.audio_tags import AudioTags
+from audiobook_generator.utils.chunk_boundaries import split_text_by_chunk_boundaries
 from audiobook_generator.utils.sentence_hash import sentence_hash as _sentence_hash
 
 logger = logging.getLogger(__name__)
@@ -62,17 +63,7 @@ def split_into_sentences(text: str, language: str = "ru") -> List[str]:
 
     Falls back to splitting on double-newlines if sentencex is not available.
     """
-    try:
-        from sentencex import segment  # type: ignore
-        from audiobook_generator.normalizers.tts_safe_split_normalizer import (
-            _merge_broken_backtick_sentences,
-        )
-        lang = language.split("-")[0]  # "ru-RU" → "ru"
-        sentences = list(segment(lang, text))
-        sentences = _merge_broken_backtick_sentences(sentences)
-    except Exception:
-        # Simple fallback: split on paragraph boundaries
-        sentences = [s.strip() for s in text.split("\n\n") if s.strip()]
+    sentences = split_text_by_chunk_boundaries(text, language)
     return [s for s in sentences if len(s.strip()) >= MIN_SENTENCE_CHARS]
 
 
@@ -403,6 +394,12 @@ class ChunkedAudioGenerator:
                 return False
         return True
 
+    def _prepare_tts_text(self, text: str) -> str:
+        prepare = getattr(self.tts_provider, "prepare_tts_text", None)
+        if callable(prepare):
+            return prepare(text)
+        return text
+
     def process_chapter(
         self,
         *,
@@ -466,7 +463,7 @@ class ChunkedAudioGenerator:
             try:
                 with self._voice_override(voice):
                     self.tts_provider.text_to_speech(
-                        self.tts_provider.prepare_tts_text(sentence), chunk_path, audio_tags
+                        self._prepare_tts_text(sentence), chunk_path, audio_tags
                     )
                 if getattr(self.config, "tts_trim_silence", True):
                     _trim_trailing_silence(chunk_path)
@@ -524,4 +521,3 @@ class ChunkedAudioGenerator:
         except Exception as exc:
             logger.error("Chapter %d merge failed: %s", chapter_idx, exc)
             return False
-

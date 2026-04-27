@@ -8,10 +8,17 @@ import json as _json
 import logging
 import re
 
-from sentencex import segment
-
 from audiobook_generator.config.general_config import GeneralConfig
 from audiobook_generator.normalizers.base_normalizer import BaseNormalizer
+from audiobook_generator.utils.chunk_boundaries import (
+    CHUNK_EOF_TAG,
+    ends_with_chunk_boundary,
+    ensure_chunk_eof_boundary,
+    merge_broken_backtick_sentences,
+    strip_chunk_boundary_tags,
+    split_text_by_chunk_boundaries,
+    split_text_preserve_chunk_separators,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +30,6 @@ MIN_SPLIT_FRAGMENT_WORDS = 2
 MIN_TTS_SAFE_CHARS = 12
 LEFT_TRIM_CHARS = " \t\r\n,;:-–—"
 RIGHT_TRIM_CHARS = " \t\r\n,;:-–—"
-SENTENCE_END_CHARS = ".!?"
 
 PRIORITY_PATTERNS = (
     # 0. Existing sentence boundary: period/!/? followed by space and capital letter.
@@ -45,9 +51,6 @@ PRIORITY_PATTERNS = (
     re.compile(r",(?=\s|$)"),
     re.compile(r"\s-\s"),
 )
-
-# Sentence split regex: split on sentence-ending punctuation followed by space.
-_SENT_SPLIT_RE = re.compile(r"(?<=[.!?]) +")
 
 DEFAULT_SAFE_SPLIT_SYSTEM_PROMPT = (
     "Ты — препроцессор текста для синтеза речи (TTS). "
@@ -168,12 +171,15 @@ class TTSSafeSplitNormalizer(BaseNormalizer):
                 item_id = f"p{pi}s{si}"
                 parts = replacements.get(item_id)
                 if parts and isinstance(parts, list):
-                    for j, part in enumerate(parts):
-                        part = part.strip()
-                        if not part:
-                            continue
-                        new_sentences.append(self._finalize_sentence(part))
-                        new_separators.append(" " if j < len(parts) - 1 else
+                    clean_parts = [part.strip() for part in parts if str(part).strip()]
+                    for j, part in enumerate(clean_parts):
+                        new_sentences.append(
+                            self._finalize_sentence(
+                                part,
+                                artificial_boundary=j < len(clean_parts) - 1,
+                            )
+                        )
+                        new_separators.append(" " if j < len(clean_parts) - 1 else
                                               (separators[si] if si < len(separators) else ""))
                 else:
                     new_sentences.append(sent)
@@ -249,12 +255,9 @@ class TTSSafeSplitNormalizer(BaseNormalizer):
             return "", 0, 0
 
         language = (self.config.language or "ru").split("-")[0].lower()
-        sentences = [item.strip() for item in segment(language, compact) if item and item.strip()]
+        sentences = split_text_by_chunk_boundaries(compact, language)
         if not sentences:
             sentences = [compact]
-        # Fix: sentencex sometimes splits inside `word!` inline quotes →
-        # re-attach the stray closing backtick to restore the intact quote.
-        sentences = _merge_broken_backtick_sentences(sentences)
 
         safe_sentences = []
         inserted_splits = 0
@@ -277,7 +280,7 @@ class TTSSafeSplitNormalizer(BaseNormalizer):
                     if current and current[-1] in "!?":
                         merged_sentences.append(f"{prev} {current}")
                     else:
-                        base_curr = current.rstrip(".").rstrip()
+                        base_curr = strip_chunk_boundary_tags(current).rstrip(".").rstrip()
                         merged_sentences.append(f"{prev} {base_curr}.")
                     i += 1
                 elif i + 1 < len(safe_sentences):
@@ -285,7 +288,7 @@ class TTSSafeSplitNormalizer(BaseNormalizer):
                     if current and current[-1] in "!?":
                         merged_sentences.append(f"{current} {next_sent}")
                     else:
-                        base = current.rstrip(".").rstrip()
+                        base = strip_chunk_boundary_tags(current).rstrip(".").rstrip()
                         merged_sentences.append(f"{base} {next_sent}")
                     i += 2
                 else:
@@ -320,7 +323,7 @@ class TTSSafeSplitNormalizer(BaseNormalizer):
                 result.append(self._finalize_sentence(current))
                 continue
 
-            result.append(self._finalize_sentence(left))
+            result.append(self._finalize_sentence(left, artificial_boundary=True))
             pending.insert(0, self._normalize_sentence_start(right))
 
         return result
@@ -372,7 +375,7 @@ class TTSSafeSplitNormalizer(BaseNormalizer):
         if len(right) < MIN_SPLIT_FRAGMENT_CHARS and len(right_words) < MIN_SPLIT_FRAGMENT_WORDS:
             return False
 
-        if left_words and left and left[-1] not in SENTENCE_END_CHARS:
+        if left_words and left and not ends_with_chunk_boundary(left):
             last_word = left_words[-1].strip('.,!?;:\'"»«`')
             if len(last_word) <= 3:
                 return False
@@ -397,11 +400,13 @@ class TTSSafeSplitNormalizer(BaseNormalizer):
                 break
         return "".join(chars)
 
-    def _finalize_sentence(self, sentence: str) -> str:
+    def _finalize_sentence(self, sentence: str, *, artificial_boundary: bool = False) -> str:
         sentence = sentence.strip()
         if not sentence:
             return ""
-        if sentence[-1] in SENTENCE_END_CHARS:
+        if artificial_boundary:
+            return ensure_chunk_eof_boundary(sentence)
+        if ends_with_chunk_boundary(sentence):
             return sentence
         return f"{sentence}."
 
@@ -447,18 +452,7 @@ def _split_text_preserve_separators(text: str) -> tuple[list[str], list[str]]:
     separators[i] is the whitespace/text between sentences[i] and sentences[i+1].
     len(separators) == len(sentences) (last entry is always "").
     """
-    tokens = _SENT_SPLIT_RE.split(text)
-    sentences: list[str] = []
-    separators: list[str] = []
-    for i, tok in enumerate(tokens):
-        if tok.strip():
-            sentences.append(tok)
-            separators.append(" " if i < len(tokens) - 1 else "")
-        else:
-            # empty / whitespace-only token → attach to previous separator
-            if separators:
-                separators[-1] = separators[-1] + tok + " "
-    return sentences, separators
+    return split_text_preserve_chunk_separators(text)
 
 
 def _rejoin_sentences(sentences: list[str], separators: list[str]) -> str:
@@ -512,32 +506,7 @@ def _merge_broken_backtick_sentences(sentences: list[str]) -> list[str]:
     Detection: current sentence has an odd number of backtick chars (unmatched opening quote)
     AND the next sentence starts with a lone backtick (`` ` `` at pos 0, then space or end).
     """
-    if len(sentences) < 2:
-        return sentences
-    result: list[str] = []
-    i = 0
-    while i < len(sentences):
-        sent = sentences[i]
-        next_sent = sentences[i + 1] if i + 1 < len(sentences) else None
-        # Heuristic: current sentence has an unmatched (opening) backtick
-        # and next sentence starts with a lone closing backtick.
-        if (
-            next_sent is not None
-            and sent.count("`") % 2 == 1
-            and next_sent.startswith("`")
-            and (len(next_sent) == 1 or next_sent[1] in (" ", "\t", "\n"))
-        ):
-            # Close the quote on the current sentence
-            result.append(sent + "`")
-            # The rest of the next sentence (after the stray backtick + optional space)
-            rest = next_sent[1:].lstrip()
-            if rest:
-                result.append(rest)
-            i += 2
-        else:
-            result.append(sent)
-            i += 1
-    return result
+    return merge_broken_backtick_sentences(sentences)
 
 
 def _parse_split_response(response_text: str) -> dict[str, list[str]]:
@@ -577,4 +546,3 @@ def _parse_split_response(response_text: str) -> dict[str, list[str]]:
         result[item_id] = [str(p) for p in parts if str(p).strip()]
 
     return result
-

@@ -96,7 +96,7 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
     </span>
     <template x-if="currentChapter">
       <button class="btn btn-green" @click="togglePlayAll()"
-              x-text="playingAll && !playingDisputed ? 'Stop' : 'Play All'"></button>
+              x-text="playlist.mode === 'all' ? 'Stop' : 'Play All'"></button>
     </template>
     <template x-if="currentChapter && Object.keys(disputedMap).length > 0 && !showOnlyDisputed">
       <button class="btn" style="background:#4a2535;color:#f38ba8;border:1px solid #6a3545"
@@ -268,11 +268,13 @@ function reviewApp() {
     statusErr: false,
     synthesizing: false,
     // playback
-    playingIdx: -1,      // chunk currently highlighted as "playing"
-    lastPlayedIdx: -1,   // last chunk the user played (for Play All resume)
-    playingAll: false,
-    playingDisputed: false,
-    playAllIdx: -1,
+    playingIdx: -1,      // chunk index currently highlighted as "playing"
+    lastPlayedIdx: -1,   // last chunk played (for Play All resume)
+    // Unified playlist state — replaces the old playingAll+playingDisputed+playAllIdx trio.
+    // mode: null | 'all' | 'disputed'  (add new modes in _buildPlaylistIndices only)
+    // indices: ordered array of chunk indices that belong to the playlist
+    // pos: current position inside indices[]
+    playlist: { mode: null, indices: [], pos: -1 },
     playerLbl: '',
     histPlaying: false,
     // editing
@@ -490,11 +492,141 @@ function reviewApp() {
       }
     },
 
+    /* ── Playlist core ── */
+
+    // Returns true when any auto-advance mode is active.
+    _isPlaylistActive() { return this.playlist.mode !== null; },
+
+    // Single point of truth for "what chunks belong to a mode".
+    // To add a new mode, add ONE branch here — nothing else needs to change.
+    _buildPlaylistIndices(mode) {
+      if (mode === 'all') {
+        return this.chunks.map((_, i) => i);
+      }
+      if (mode === 'disputed') {
+        return this.chunks
+          .map((c, i) => this.isDisputed(c.hash) ? i : -1)
+          .filter(i => i >= 0);
+      }
+      return [];
+    },
+
+    _stopPlaylist() {
+      this.playlist = { mode: null, indices: [], pos: -1 };
+      this.showOnlyDisputed = false;
+      this._stopMain();
+    },
+
+    // Kept as alias — selectChapter / showAllChunks call this name.
+    stopPlayAll() { this._stopPlaylist(); },
+
+    _startPlaylist(mode) {
+      this._stopPlaylist();
+      const indices = this._buildPlaylistIndices(mode);
+      if (!indices.length) {
+        this.st(mode === 'disputed' ? 'No disputed chunks' : 'Nothing to play', true);
+        return;
+      }
+      // For 'all', resume from last played position.
+      let startPos = 0;
+      if (mode === 'all' && this.lastPlayedIdx >= 0) {
+        const idx = indices.indexOf(this.lastPlayedIdx);
+        if (idx >= 0) startPos = idx;
+      }
+      this.playlist = { mode, indices, pos: startPos };
+      this.showOnlyDisputed = (mode === 'disputed');
+      this._playPlaylistAt(startPos);
+    },
+
+    // Core player step — advances through indices[pos].
+    // All modes share this single method; per-mode differences are limited to
+    // the label prefix and whether to fall back to history on no-audio chunks.
+    async _playPlaylistAt(pos) {
+      const { mode, indices } = this.playlist;
+      if (!mode) return; // playlist was stopped while we were awaiting
+
+      if (pos < 0 || pos >= indices.length) {
+        const endMsg = mode === 'disputed' ? '🔴 All disputed played' : 'Playback finished';
+        this._stopPlaylist();
+        this.st(endMsg);
+        return;
+      }
+
+      this.playlist.pos = pos;
+      const chunkIdx = indices[pos];
+      const c = this.chunks[chunkIdx];
+      if (!c) { setTimeout(() => this._playPlaylistAt(pos + 1), 0); return; }
+
+      // Scroll into view
+      this.$nextTick(() => {
+        const row = document.querySelector('[data-ci="' + chunkIdx + '"]');
+        if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      });
+
+      const lbl = (mode === 'disputed' ? '🔴 ' : '') + '#' + (chunkIdx + 1) + ' ' + c.text.slice(0, 50);
+
+      if (c.has_audio) {
+        this.histChunk = -1; this.histEntries = []; this.histSel = -1;
+        this.histAudioSrc = ''; this.histPlaying = false;
+        this.playingIdx = chunkIdx;
+        this.lastPlayedIdx = chunkIdx;
+        this._savePos();
+        this._playMain(this._url(c.hash), lbl);
+      } else if (mode === 'all') {
+        // Play-all falls back to history audio when current audio is missing.
+        const hist = await this._getHist(c.hash);
+        if (!this.playlist.mode) return; // stopped while fetching
+        if (hist.length > 0) {
+          this.histChunk = chunkIdx;
+          this.histEntries = hist;
+          this.histSel = 0;
+          this.histAudioSrc = this._url(hist[0].hash);
+          this.histPlaying = true;
+          this.playingIdx = chunkIdx;
+          this.lastPlayedIdx = chunkIdx;
+          this._savePos();
+          this.st('#' + (chunkIdx + 1) + ' -> history ' + hist[0].hash.slice(0, 6));
+          this._waitEl('hist-audio', ha => {
+            ha.src = this.histAudioSrc;
+            ha.playbackRate = this.playbackRate;
+            ha.play().catch(() => {
+              this.histPlaying = false;
+              this._playPlaylistAt(pos + 1);
+            });
+          });
+        } else {
+          this.st('#' + (chunkIdx + 1) + ' skipped (no audio)');
+          setTimeout(() => this._playPlaylistAt(pos + 1), 0);
+        }
+      } else {
+        // Other modes (e.g. 'disputed'): skip chunks that have no audio.
+        setTimeout(() => this._playPlaylistAt(pos + 1), 0);
+      }
+    },
+
     /* ── Manual play ── */
     playBtn(i) {
-      this.stopPlayAll();
       const c = this.chunks[i];
       if (!c.has_audio) { this.st('No audio for #' + (i + 1), true); return; }
+
+      // If a playlist is active and the clicked chunk is in it, jump within
+      // the playlist WITHOUT changing the mode or filter.
+      if (this._isPlaylistActive()) {
+        const pos = this.playlist.indices.indexOf(i);
+        if (pos >= 0) {
+          this.playlist.pos = pos;
+          this.playingIdx = i;
+          this.lastPlayedIdx = i;
+          this._savePos();
+          const lbl = (this.playlist.mode === 'disputed' ? '🔴 ' : '') + '#' + (i + 1) + ' ' + c.text.slice(0, 50);
+          this._playMain(this._url(c.hash), lbl);
+          return;
+        }
+        // Clicked a chunk that is NOT in the current playlist → exit playlist
+        // and fall through to plain manual play.
+        this._stopPlaylist();
+      }
+
       this.playingIdx = i;
       this.lastPlayedIdx = i;
       this.histPlaying = false;
@@ -503,23 +635,8 @@ function reviewApp() {
     },
 
     onMainEnded() {
-      if (this.playingDisputed) {
-        // Find next disputed chunk after current
-        const disputedIdxs = this._disputedIndices();
-        const next = disputedIdxs.find(idx => idx > this.playAllIdx);
-        if (next !== undefined) {
-          this.playAllIdx = next;
-          this._playDisputedAt(next);
-        } else {
-          this.playingDisputed = false;
-          this.playingAll = false;
-          this.playingIdx = -1;
-          this.playerLbl = '';
-          this.st('🔴 All disputed chunks played');
-        }
-      } else if (this.playingAll) {
-        this.playAllIdx++;
-        this._playAllNext();
+      if (this._isPlaylistActive()) {
+        this._playPlaylistAt(this.playlist.pos + 1);
       } else {
         this.playingIdx = -1;
         this.playerLbl = '';
@@ -528,168 +645,43 @@ function reviewApp() {
 
     /* ── Prev / Next ── */
     prevChunk() {
-      if (this.playingDisputed) {
-        const idxs = this._disputedIndices();
-        const pos = idxs.indexOf(this.playingIdx);
-        if (pos > 0) this._playDisputedAt(idxs[pos - 1]);
+      if (this._isPlaylistActive()) {
+        const newPos = this.playlist.pos - 1;
+        if (newPos >= 0) this._playPlaylistAt(newPos);
         return;
       }
       const start = this.playingIdx > 0 ? this.playingIdx - 1 : 0;
       for (let i = start; i >= 0; i--) {
-        if (this.chunks[i] && this.chunks[i].has_audio) { this.playBtn(i); return; }
+        if (this.chunks[i]?.has_audio) { this.playBtn(i); return; }
       }
     },
 
     nextChunk() {
-      if (this.playingDisputed) {
-        const idxs = this._disputedIndices();
-        const pos = idxs.indexOf(this.playingIdx);
-        if (pos >= 0 && pos < idxs.length - 1) this._playDisputedAt(idxs[pos + 1]);
+      if (this._isPlaylistActive()) {
+        this._playPlaylistAt(this.playlist.pos + 1);
         return;
       }
       const start = this.playingIdx >= 0 ? this.playingIdx + 1 : 0;
       for (let i = start; i < this.chunks.length; i++) {
-        if (this.chunks[i] && this.chunks[i].has_audio) { this.playBtn(i); return; }
+        if (this.chunks[i]?.has_audio) { this.playBtn(i); return; }
       }
     },
 
-    /* ── Play All ── */
+    /* ── Play All / Play Disputed buttons ── */
     togglePlayAll() {
-      if (this.playingAll && !this.playingDisputed) { this.stopPlayAll(); return; }
-      this.stopPlayAll();
-      this.playingAll = true;
-      this.playingDisputed = false;
-      // Resume from last played position (or from start)
-      this.playAllIdx = this.lastPlayedIdx >= 0 ? this.lastPlayedIdx : 0;
-      this._playAllNext();
-    },
-
-    stopPlayAll() {
-      this.playingAll = false;
-      this.playingDisputed = false;
-      this.showOnlyDisputed = false;
-      this.playAllIdx = -1;
-      this.histPlaying = false;
-      this._stopMain();
-    },
-
-    /* ── Play Disputed ── */
-    _disputedIndices() {
-      return this.chunks
-        .map((c, i) => this.isDisputed(c.hash) ? i : -1)
-        .filter(i => i >= 0);
+      if (this.playlist.mode === 'all') { this._stopPlaylist(); return; }
+      this._startPlaylist('all');
     },
 
     togglePlayDisputed() {
-      if (this.playingDisputed) { this.stopPlayAll(); return; }
-      this.stopPlayAll();
-      const idxs = this._disputedIndices();
-      if (!idxs.length) { this.st('No disputed chunks in this chapter', true); return; }
-      this.showOnlyDisputed = true;
-      this.playingAll = true;
-      this.playingDisputed = true;
-      this.playAllIdx = idxs[0];
-      this._playDisputedAt(idxs[0]);
-    },
-
-    _playDisputedAt(i) {
-      const c = this.chunks[i];
-      if (!c) return;
-      this.$nextTick(() => {
-        const row = document.querySelector('[data-ci="' + i + '"]');
-        if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      });
-      if (c.has_audio) {
-        this.playingIdx = i;
-        this.lastPlayedIdx = i;
-        this._savePos();
-        this._playMain(this._url(c.hash), '🔴 #' + (i + 1) + ' ' + c.text.slice(0, 50));
-      } else {
-        // No audio — skip to next disputed
-        const idxs = this._disputedIndices();
-        const next = idxs.find(idx => idx > i);
-        if (next !== undefined) {
-          this.playAllIdx = next;
-          this._playDisputedAt(next);
-        } else {
-          this.playingDisputed = false;
-          this.playingAll = false;
-          this.st('🔴 All disputed chunks played');
-        }
-      }
-    },
-
-    async _playAllNext() {
-      if (!this.playingAll) return;
-
-      if (this.playAllIdx >= this.chunks.length) {
-        this.playingAll = false;
-        this.playingIdx = -1;
-        this.playerLbl = '';
-        this.st('Playback finished');
-        return;
-      }
-
-      const i = this.playAllIdx;
-      const c = this.chunks[i];
-
-      // Scroll into view
-      this.$nextTick(() => {
-        const row = document.querySelector('[data-ci="' + i + '"]');
-        if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      });
-
-      if (c.has_audio) {
-        // Close any auto-opened history panel
-        this.histChunk = -1;
-        this.histEntries = [];
-        this.histSel = -1;
-        this.histAudioSrc = '';
-        this.histPlaying = false;
-        this.playingIdx = i;
-        this.lastPlayedIdx = i;
-        this._savePos();
-        this._playMain(this._url(c.hash), '#' + (i + 1) + ' ' + c.text.slice(0, 50));
-
-      } else {
-        // No current audio — try history
-        const hist = await this._getHist(c.hash);
-        if (hist.length > 0) {
-          // Open history panel and play first entry
-          this.histChunk = i;
-          this.histEntries = hist;
-          this.histSel = 0;
-          this.histAudioSrc = this._url(hist[0].hash);
-          this.histPlaying = true;
-          this.playingIdx = i;
-          this.lastPlayedIdx = i;
-          this._savePos();
-          this.st('#' + (i + 1) + ' -> history ' + hist[0].hash.slice(0, 6));
-          // Wait for #hist-audio to mount (x-if may need multiple ticks)
-          this._waitEl('hist-audio', ha => {
-            ha.src = this.histAudioSrc;
-            ha.playbackRate = this.playbackRate;
-            ha.play().catch(() => {
-              // If play fails (e.g. audio not found), skip to next
-              this.histPlaying = false;
-              this.playAllIdx++;
-              this._playAllNext();
-            });
-          });
-        } else {
-          // No audio at all — skip
-          this.st('#' + (i + 1) + ' skipped (no audio)');
-          this.playAllIdx++;
-          setTimeout(() => this._playAllNext(), 0);
-        }
-      }
+      if (this.playlist.mode === 'disputed') { this._stopPlaylist(); return; }
+      this._startPlaylist('disputed');
     },
 
     onHistEnded() {
-      if (this.playingAll && this.histPlaying) {
+      if (this._isPlaylistActive() && this.histPlaying) {
         this.histPlaying = false;
-        this.playAllIdx++;
-        this._playAllNext();
+        this._playPlaylistAt(this.playlist.pos + 1);
       }
     },
 

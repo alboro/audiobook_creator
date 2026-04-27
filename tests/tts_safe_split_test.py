@@ -21,6 +21,7 @@ from audiobook_generator.normalizers.tts_safe_split_normalizer import (
     DEFAULT_SAFE_SPLIT_SYSTEM_PROMPT,
     _get_safe_split_prompt,
 )
+from audiobook_generator.utils.chunk_boundaries import CHUNK_EOF_TAG
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +91,17 @@ class TestSplitTextPreserveSeparators(unittest.TestCase):
         sentences, separators = _split_text_preserve_separators(text)
         rejoined = _rejoin_sentences(sentences, separators)
         self.assertEqual(rejoined, text)
+
+    def test_chunk_eof_is_sentence_separator(self):
+        sentences, separators = _split_text_preserve_separators(
+            f"Первая часть{CHUNK_EOF_TAG} Вторая часть."
+        )
+        self.assertEqual(sentences, ["Первая часть", "Вторая часть."])
+        self.assertEqual(separators[0], f" {CHUNK_EOF_TAG} ")
+        self.assertEqual(
+            _rejoin_sentences(sentences, separators),
+            f"Первая часть {CHUNK_EOF_TAG} Вторая часть.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +226,18 @@ class TestTTSSafeSplitNormalizerAlgorithmic(unittest.TestCase):
         self.assertIn("куда", result)
         self.assertIn("Никто", result)
 
+    def test_forced_split_uses_chunk_eof_instead_of_period(self):
+        sentence = (
+            "Первая достаточно длинная часть фразы, "
+            "Вторая достаточно длинная часть фразы продолжается до конца."
+        )
+        n = _make_algo_normalizer(max_chars=70)
+        parts = n._split_long_sentence(sentence)
+        self.assertGreaterEqual(len(parts), 2)
+        self.assertTrue(parts[0].endswith(CHUNK_EOF_TAG), parts)
+        self.assertFalse(parts[0].endswith("."))
+        self.assertTrue(parts[-1].endswith("."))
+
     def test_multiple_paragraphs_preserved(self):
         text = "Первый абзац.\n\nВторой абзац."
         result = self._algo_normalize(text)
@@ -280,6 +304,7 @@ class TestTTSSafeSplitNormalizerLLM(unittest.TestCase):
             result = n._llm_split_long_sentences(long_sent + " Короткое.")
 
         self.assertIn("Очень длинное предложение", result)
+        self.assertIn(CHUNK_EOF_TAG, result)
         self.assertIn("которое нужно разбить", result)
 
     def test_llm_not_called_when_all_short(self):
@@ -474,5 +499,3 @@ class TestAlgoNormalizerBacktickQuote(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
