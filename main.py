@@ -200,6 +200,19 @@ def handle_args():
         help="AAC bitrate for m4b packaging (default: 64k).",
     )
     parser.add_argument(
+        "--chapter_titles_file",
+        default=None,
+        help=(
+            "Optional UTF-8 text file with one chapter title per line, in packaging order. "
+            "Non-empty lines override chapter marker titles in the final m4b."
+        ),
+    )
+    parser.add_argument(
+        "--cover_image",
+        default=None,
+        help="Optional path to a cover image file (jpg/png/webp, etc.) used for m4b packaging.",
+    )
+    parser.add_argument(
         "--ffmpeg_path",
         default="ffmpeg",
         help="Path to ffmpeg binary used for m4b packaging.",

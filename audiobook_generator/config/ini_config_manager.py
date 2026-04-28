@@ -137,6 +137,8 @@ FIELD_SECTIONS: Dict[str, str] = {
     "audio_folder": "m4b",
     "m4b_filename": "m4b",
     "m4b_bitrate": "m4b",
+    "chapter_titles_file": "m4b",
+    "cover_image": "m4b",
     "ffmpeg_path": "m4b",
 }
 
@@ -307,4 +309,3 @@ def merge_ini_into_args(args: Any, ini_values: Dict[str, Any]) -> None:
                 setattr(args, key, coerced)
         else:
             setattr(args, key, raw_value)
-

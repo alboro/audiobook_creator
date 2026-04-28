@@ -35,6 +35,10 @@ class TestHandleArgs(unittest.TestCase):
             'https://example.com/jobs',
             '--openai_status_url_template',
             'https://example.com/jobs/{job_id}',
+            '--chapter_titles_file',
+            '/tmp/chapter_titles.txt',
+            '--cover_image',
+            '/tmp/cover.jpg',
         ],
     )
     def test_optional_mvp_flags(self):
@@ -42,6 +46,8 @@ class TestHandleArgs(unittest.TestCase):
         self.assertTrue(config.normalize)
         self.assertTrue(config.package_m4b)
         self.assertTrue(config.openai_enable_polling)
+        self.assertEqual(config.chapter_titles_file, '/tmp/chapter_titles.txt')
+        self.assertEqual(config.cover_image, '/tmp/cover.jpg')
 
     @patch('sys.argv', ['program', 'input_file.epub', 'output_folder', '--mode', 'prepare'])
     def test_mode_prepare(self):

@@ -32,7 +32,7 @@ def _make_args(**kwargs):
         language=None, voice_name=None, output_format=None, model_name=None,
         log=None, no_prompt=None, worker_count=None, use_pydub_merge=None,
         package_m4b=None, chunked_audio=None, audio_folder=None,
-        m4b_filename=None, m4b_bitrate=None, ffmpeg_path=None,
+        m4b_filename=None, m4b_bitrate=None, chapter_titles_file=None, cover_image=None, ffmpeg_path=None,
         title_mode=None, chapter_mode=None, newline_mode=None,
         chapter_start=None, chapter_end=None, search_and_replace_file=None,
         output_text=None, prepared_text_folder=None, force_new_run=None,
@@ -117,6 +117,18 @@ audio_folder = smb://DIETPI._smb._tcp.local/aldem/books/example/wav/
             values["audio_folder"],
             "smb://DIETPI._smb._tcp.local/aldem/books/example/wav/",
         )
+
+    def test_reads_cover_and_chapter_titles_from_m4b_section(self):
+        from audiobook_generator.config.ini_config_manager import load_ini
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = _make_ini(Path(tmp) / "test.ini", """
+[m4b]
+chapter_titles_file = /tmp/chapter_titles.txt
+cover_image = /tmp/cover.jpg
+""")
+            values = load_ini(ini)
+        self.assertEqual(values["chapter_titles_file"], "/tmp/chapter_titles.txt")
+        self.assertEqual(values["cover_image"], "/tmp/cover.jpg")
 
     def test_missing_file_returns_empty_dict(self):
         from audiobook_generator.config.ini_config_manager import load_ini
@@ -497,4 +509,3 @@ class TestAudioFolderOverride(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

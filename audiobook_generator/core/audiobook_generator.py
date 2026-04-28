@@ -1,4 +1,5 @@
 import logging
+import mimetypes
 import multiprocessing
 import os
 import signal
@@ -313,6 +314,67 @@ class AudiobookGenerator:
             return smb_local
         return audio_folder
 
+    def _load_cover_override(self):
+        """Load an explicit cover image override for m4b packaging, if configured."""
+        cover_image = getattr(self.config, "cover_image", None)
+        if not cover_image:
+            return None
+
+        cover_path = Path(str(cover_image)).expanduser()
+        if not cover_path.is_file():
+            logger.warning("Configured cover_image does not exist: %s", cover_path)
+            return None
+
+        media_type, _encoding = mimetypes.guess_type(str(cover_path))
+        if not media_type or not media_type.startswith("image/"):
+            media_type = "image/jpeg"
+
+        try:
+            return cover_path.read_bytes(), media_type
+        except Exception as exc:
+            logger.warning("Failed to read cover image %s: %s", cover_path, exc)
+            return None
+
+    def _resolve_package_cover(self, default_cover=None):
+        """Return explicit cover override when configured, else the parser-provided cover."""
+        return self._load_cover_override() or default_cover
+
+    def _apply_chapter_title_overrides(self, chapter_titles: list[str]) -> list[str]:
+        """Apply optional per-line chapter title overrides for final m4b chapter markers."""
+        titles_path = getattr(self.config, "chapter_titles_file", None)
+        if not titles_path:
+            return chapter_titles
+
+        path = Path(str(titles_path)).expanduser()
+        if not path.is_file():
+            logger.warning("Configured chapter_titles_file does not exist: %s", path)
+            return chapter_titles
+
+        try:
+            raw_lines = path.read_text(encoding="utf-8").splitlines()
+        except Exception as exc:
+            logger.warning("Failed to read chapter_titles_file %s: %s", path, exc)
+            return chapter_titles
+
+        resolved_titles = list(chapter_titles)
+        applied = 0
+        for idx, raw_line in enumerate(raw_lines[:len(resolved_titles)]):
+            title = raw_line.strip()
+            if not title:
+                continue
+            resolved_titles[idx] = title
+            applied += 1
+
+        if len(raw_lines) > len(resolved_titles):
+            logger.warning(
+                "chapter_titles_file has %d extra line(s) beyond the %d packaged chapter(s); ignoring extras.",
+                len(raw_lines) - len(resolved_titles),
+                len(resolved_titles),
+            )
+
+        logger.info("Applied %d chapter title override(s) from %s", applied, path)
+        return resolved_titles
+
     @staticmethod
     def _scan_audio_files(audio_folder: str):
         """Return (file_path, chapter_title) pairs for all audio files in *audio_folder*,
@@ -617,7 +679,7 @@ class AudiobookGenerator:
                     return
 
         chapter_files = [p for p, _ in scanned]
-        chapter_titles = [t for _, t in scanned]
+        chapter_titles = self._apply_chapter_title_overrides([t for _, t in scanned])
         logger.info("Found %d audio file(s) to package.", len(chapter_files))
 
         # Book metadata — only read epub/fb2 if the input file is available.
@@ -630,6 +692,7 @@ class AudiobookGenerator:
                 book_cover = book_parser.get_book_cover()
             except Exception as exc:
                 logger.warning("Could not read book metadata: %s", exc)
+        book_cover = self._resolve_package_cover(book_cover)
 
         m4b_path = package_m4b(
             chapter_files=chapter_files,
@@ -1120,7 +1183,9 @@ class AudiobookGenerator:
                 and not failed_chapters
             ):
                 chapter_files = [path for _, _, path in chapter_output_records if os.path.exists(path)]
-                chapter_titles = [title for _, title, path in chapter_output_records if os.path.exists(path)]
+                chapter_titles = self._apply_chapter_title_overrides(
+                    [title for _, title, path in chapter_output_records if os.path.exists(path)]
+                )
                 if len(chapter_files) != len(chapter_output_records):
                     logger.warning("Skipping m4b packaging because not all chapter files were produced.")
                 else:
@@ -1133,7 +1198,7 @@ class AudiobookGenerator:
                         ffmpeg_path=self.config.ffmpeg_path,
                         output_filename=self.config.m4b_filename,
                         bitrate=self.config.m4b_bitrate,
-                        cover=book_parser.get_book_cover(),
+                        cover=self._resolve_package_cover(book_parser.get_book_cover()),
                     )
                     logger.info("Packaged m4b audiobook: %s", m4b_path)
 

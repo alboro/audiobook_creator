@@ -30,6 +30,8 @@ def _make_config(output_folder: str, chunked_audio: bool = True) -> SimpleNamesp
         voice_name2=None,
         chunked_audio=chunked_audio,
         audio_folder=None,
+        chapter_titles_file=None,
+        cover_image=None,
     )
 
 
@@ -617,3 +619,38 @@ def test_run_package_only_skips_smart_when_not_chunked():
         # But package_m4b should still be called via _scan_audio_files path
         assert len(packaged) == 1
 
+
+def test_run_package_only_applies_title_and_cover_overrides():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        wav_dir = root / "wav"
+        wav_dir.mkdir(parents=True)
+        dummy_file = wav_dir / "0001_Chapter.wav"
+        dummy_file.write_bytes(_FAKE_WAV)
+
+        titles_file = root / "chapter_titles.txt"
+        titles_file.write_text("Custom Chapter Title\n", encoding="utf-8")
+        cover_file = root / "cover.jpg"
+        cover_file.write_bytes(b"fake-jpeg-data")
+
+        gen = _make_generator(str(root), chunked_audio=False)
+        gen.config.chapter_titles_file = str(titles_file)
+        gen.config.cover_image = str(cover_file)
+        gen.config.input_file = None
+        gen.config.m4b_filename = None
+        gen.config.m4b_bitrate = "64k"
+        gen.config.ffmpeg_path = "ffmpeg"
+
+        packaged: list[dict] = []
+
+        def fake_package(**kwargs):
+            packaged.append(kwargs)
+            return "out.m4b"
+
+        with patch.object(gen, "_detect_audio_folder", return_value=str(wav_dir)), \
+             patch("audiobook_generator.core.audiobook_generator.package_m4b", side_effect=fake_package):
+            gen._run_package_only()
+
+        assert len(packaged) == 1
+        assert packaged[0]["chapter_titles"] == ["Custom Chapter Title"]
+        assert packaged[0]["cover"] == (b"fake-jpeg-data", "image/jpeg")

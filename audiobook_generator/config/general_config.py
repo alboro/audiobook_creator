@@ -26,6 +26,8 @@ class GeneralConfig:
         self.audio_folder = getattr(args, 'audio_folder', None)
         self.m4b_filename = getattr(args, 'm4b_filename', None)
         self.m4b_bitrate = getattr(args, 'm4b_bitrate', None)
+        self.chapter_titles_file = getattr(args, 'chapter_titles_file', None)
+        self.cover_image = getattr(args, 'cover_image', None)
         self.ffmpeg_path = getattr(args, 'ffmpeg_path', None)
 
         # Book parser specific arguments
