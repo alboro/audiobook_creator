@@ -80,6 +80,11 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-thumb{background:#45475a;border-radius:3px}
 ::-webkit-scrollbar-track{background:transparent}
+.ch-h2-editable{flex:1;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;color:#cdd6f4;transition:color .1s}
+.ch-h2-editable:hover{color:#89b4fa}
+.ch-h2-overridden{color:#a6e3a1}
+.ch-h2-overridden:hover{color:#89b4fa}
+.chapter-title-input{flex:1;background:#252538;color:#cdd6f4;border:1px solid #89b4fa;border-radius:4px;padding:3px 8px;font-size:14px;font-weight:600;outline:none;min-width:0}
 </style>
 </head>
 <body x-data="reviewApp()" x-init="boot()">
@@ -149,7 +154,20 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
 
   <div class="main">
     <div class="chapter-bar" x-show="currentChapter">
-      <h2 x-text="currentChapter ? currentChapter.title : ''"></h2>
+      <template x-if="!chapterTitleEditing">
+        <h2 class="ch-h2-editable"
+            :class="{'ch-h2-overridden': currentChapter && chapterTitleOverrides[currentChapter.idx - 1]}"
+            :title="chapterTitleHint()"
+            @click="startChapterTitleEdit()"
+            x-text="chapterDisplayTitle()"></h2>
+      </template>
+      <template x-if="chapterTitleEditing">
+        <input class="chapter-title-input" type="text"
+               x-model="chapterTitleText"
+               @keydown.enter="saveChapterTitle()"
+               @keydown.escape="cancelChapterTitleEdit()"
+               x-init="$nextTick(() => { $el.focus(); $el.select(); })">
+      </template>
     </div>
 
     <div class="chunk-list">
@@ -322,6 +340,11 @@ function reviewApp() {
     disputeThreshold: 0.70,
     histAudioSrc: '',
     playbackRate: 1.0,
+    // chapter title editing
+    chapterTitleEditing: false,
+    chapterTitleText: '',
+    chapterTitleOverrides: [],   // 0-based array: overrides[chapter_idx - 1]
+    chapterTitlesPath: null,
 
     /* ── Boot / persistence ── */
     async boot() {
@@ -423,6 +446,9 @@ function reviewApp() {
         if (!r.ok) throw new Error(await r.text());
         this.chapters = await r.json();
         this.st(this.chapters.length + ' chapters');
+
+        // Reload chapter title overrides for the (potentially new) output dir
+        this._loadChapterTitleOverrides();
 
         // Restore saved chapter
         const savedKey = localStorage.getItem('rev_chapter_key');
@@ -822,6 +848,65 @@ function reviewApp() {
         this.chunks = [...this.chunks];
         this.cancelEdit();
         this.st('Saved');
+      } catch (e) {
+        this.st('Error: ' + e.message, true);
+      }
+    },
+
+    /* ── Chapter title editing ── */
+    async _loadChapterTitleOverrides() {
+      try {
+        const r = await fetch('/api/chapter_titles?dir=' + encodeURIComponent(this.outputDir));
+        if (r.ok) {
+          const d = await r.json();
+          this.chapterTitleOverrides = d.titles || [];
+          this.chapterTitlesPath = d.path || null;
+        }
+      } catch (_) {}
+    },
+
+    chapterDisplayTitle() {
+      if (!this.currentChapter) return '';
+      const override = this.chapterTitleOverrides[this.currentChapter.idx - 1];
+      return override || this.currentChapter.title;
+    },
+
+    chapterTitleHint() {
+      const override = this.currentChapter ? this.chapterTitleOverrides[this.currentChapter.idx - 1] : null;
+      return override
+        ? '✎ Override active. Click to edit m4b chapter title'
+        : '✎ Click to set m4b chapter title override';
+    },
+
+    startChapterTitleEdit() {
+      if (!this.currentChapter) return;
+      const override = this.chapterTitleOverrides[this.currentChapter.idx - 1];
+      this.chapterTitleText = override || this.currentChapter.title;
+      this.chapterTitleEditing = true;
+    },
+
+    cancelChapterTitleEdit() {
+      this.chapterTitleEditing = false;
+      this.chapterTitleText = '';
+    },
+
+    async saveChapterTitle() {
+      if (!this.currentChapter) return;
+      const title = this.chapterTitleText.trim();
+      try {
+        const r = await fetch('/api/chapter_title', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dir: this.outputDir, chapter_idx: this.currentChapter.idx, title }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        const overrides = [...this.chapterTitleOverrides];
+        const lineIdx = this.currentChapter.idx - 1;
+        while (overrides.length <= lineIdx) overrides.push('');
+        overrides[lineIdx] = title;
+        this.chapterTitleOverrides = overrides;
+        this.cancelChapterTitleEdit();
+        this.st('Chapter title saved');
       } catch (e) {
         this.st('Error: ' + e.message, true);
       }

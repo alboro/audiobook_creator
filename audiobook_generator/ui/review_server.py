@@ -321,6 +321,98 @@ async def delete_sentence(req: DeleteRequest):
     return {"status": "ok", "deleted_hash": old_hash}
 
 
+def _get_chapter_titles_file_path(output_dir: Optional[str] = None) -> Optional[Path]:
+    """Return the chapter_titles_file path.
+
+    Priority:
+      1. chapter_titles_file from server config / merged INI (explicit override).
+      2. Auto-computed fallback: <output_dir>/text/<latest_run>/chapter_titles.txt
+         (created on demand when the user edits a title via the Review UI).
+    """
+    cfg = getattr(app.state, "review_config", None)
+    path = getattr(cfg, "chapter_titles_file", None)
+    if not path:
+        try:
+            ini = load_merged_ini()
+            path = ini.get("chapter_titles_file")
+        except Exception:
+            pass
+    if path:
+        return Path(str(path)).expanduser()
+
+    # Fallback: derive path from the latest run folder inside output_dir
+    if output_dir:
+        run_folder = find_latest_run_folder(output_dir)
+        if run_folder:
+            return run_folder / "chapter_titles.txt"
+        # No run folder yet — place it directly in <output_dir>/text/
+        text_dir = Path(output_dir) / "text"
+        if text_dir.exists():
+            return text_dir / "chapter_titles.txt"
+
+    return None
+
+
+@app.get("/api/chapter_titles")
+async def get_chapter_titles(dir: str = ""):
+    """Return the chapter_titles_file path and its current lines (0-indexed overrides)."""
+    path = _get_chapter_titles_file_path(dir or None)
+    if not path:
+        return {"path": None, "titles": []}
+    titles: list[str] = []
+    if path.is_file():
+        try:
+            titles = path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            pass
+    return {"path": str(path), "titles": titles}
+
+
+class SaveChapterTitleRequest(BaseModel):
+    dir: str = ""
+    chapter_idx: int   # 1-based, as returned by /api/chapters
+    title: str
+
+
+@app.post("/api/chapter_title")
+async def save_chapter_title(req: SaveChapterTitleRequest):
+    """Write a chapter title override into chapter_titles_file (one title per line).
+
+    If chapter_titles_file is not configured in INI, the file is auto-created at
+    <output_dir>/text/<latest_run>/chapter_titles.txt.
+    """
+    path = _get_chapter_titles_file_path(req.dir or None)
+    if not path:
+        raise HTTPException(
+            400,
+            "Cannot determine chapter_titles_file path: "
+            "either set chapter_titles_file in [m4b] config or run --mode prepare first.",
+        )
+
+    existing: list[str] = []
+    if path.is_file():
+        try:
+            existing = path.read_text(encoding="utf-8").splitlines()
+        except Exception as e:
+            raise HTTPException(500, f"Cannot read chapter_titles_file: {e}")
+
+    line_idx = req.chapter_idx - 1  # convert to 0-based
+    if line_idx < 0:
+        raise HTTPException(400, "chapter_idx must be >= 1")
+
+    while len(existing) <= line_idx:
+        existing.append("")
+    existing[line_idx] = req.title.strip()
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(existing) + "\n", encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(500, f"Cannot write chapter_titles_file: {e}")
+
+    return {"status": "ok", "path": str(path), "line_idx": line_idx}
+
+
 @app.get("/api/settings")
 async def get_settings():
     """Return server-side config values useful for the Review UI."""
