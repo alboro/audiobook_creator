@@ -783,7 +783,8 @@ class AudiobookGenerator:
                 from audiobook_generator.utils.filename_sanitizer import make_safe_filename as _msf, make_chapter_key
                 # DB lives inside wav/ so it's co-located with the audio files
                 chunk_store_path = os.path.join(wav_out_dir, "_state", "audio_chunks.sqlite3")
-                chunk_store = AudioChunkStore(chunk_store_path)
+                no_db = bool(getattr(self.config, "chunked_audio_no_db", False))
+                chunk_store = None if no_db else AudioChunkStore(chunk_store_path)
                 chunks_base = os.path.join(wav_out_dir, "chunks")
                 # Chapter key = safe directory name (no extension)
                 chapter_key = make_chapter_key(title=title, idx=idx)

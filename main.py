@@ -200,6 +200,17 @@ def handle_args():
         ),
     )
     parser.add_argument(
+        "--chunked_audio_no_db",
+        action="store_true",
+        help=(
+            "Disable all SQLite DB writes during chunked synthesis. "
+            "No sentence text history is recorded. "
+            "Incompatible with --mode audio_check (which requires the DB). "
+            "Useful when you only need the audio files and do not intend to use "
+            "the Review UI or audio quality check features."
+        ),
+    )
+    parser.add_argument(
         "--audio_folder",
         default=None,
         help=(

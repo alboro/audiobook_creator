@@ -136,6 +136,7 @@ FIELD_SECTIONS: Dict[str, str] = {
     # [m4b] --------------------------------------------------------------------
     "package_m4b": "m4b",
     "chunked_audio": "m4b",
+    "chunked_audio_no_db": "m4b",
     "audio_folder": "m4b",
     "m4b_filename": "m4b",
     "m4b_bitrate": "m4b",
@@ -150,7 +151,7 @@ BOOL_FIELDS = {
     "normalize", "normalize_log_changes",
     "openai_enable_polling",
     "normalize_tsnorm_stress_yo", "normalize_tsnorm_stress_monosyllabic",
-    "qwen_stream", "package_m4b", "chunked_audio",
+    "qwen_stream", "package_m4b", "chunked_audio", "chunked_audio_no_db",
     "tts_log_text", "tts_chunk_smooth_join",
 }
 

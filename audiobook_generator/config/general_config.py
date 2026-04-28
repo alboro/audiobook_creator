@@ -23,6 +23,7 @@ class GeneralConfig:
         self.force_new_run = getattr(args, 'force_new_run', None)
         self.package_m4b = getattr(args, 'package_m4b', None)
         self.chunked_audio = getattr(args, 'chunked_audio', None)
+        self.chunked_audio_no_db = getattr(args, 'chunked_audio_no_db', False) or False
         self.audio_folder = getattr(args, 'audio_folder', None)
         self.m4b_filename = getattr(args, 'm4b_filename', None)
         self.m4b_bitrate = getattr(args, 'm4b_bitrate', None)

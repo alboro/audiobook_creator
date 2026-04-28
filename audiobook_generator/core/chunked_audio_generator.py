@@ -568,13 +568,13 @@ class ChunkedAudioGenerator:
         self,
         *,
         config,
-        chunk_store: AudioChunkStore,
+        chunk_store: Optional["AudioChunkStore"],
         tts_provider,
         chunks_base_dir: str,
         run_id: str = "",
     ):
         self.config = config
-        self.store = chunk_store
+        self.store = chunk_store  # may be None when DB tracking is disabled
         self.tts_provider = tts_provider
         self.chunks_base_dir = Path(chunks_base_dir)
 
@@ -662,18 +662,20 @@ class ChunkedAudioGenerator:
         )
 
         # Record sentence texts in version history (INSERT OR IGNORE — no-op if already present).
-        registered_new = 0
-        registered_existing = 0
-        for sentence, _voice in sentence_voice_pairs:
-            s_hash = _sentence_hash(sentence)
-            if self.store.save_sentence_version(s_hash, sentence):
-                registered_new += 1
-            else:
-                registered_existing += 1
-        logger.info(
-            "Chapter %d sentence text history: %d new, %d already known.",
-            chapter_idx, registered_new, registered_existing,
-        )
+        # Skipped when store is None (chunked_audio_no_db=true).
+        if self.store is not None:
+            registered_new = 0
+            registered_existing = 0
+            for sentence, _voice in sentence_voice_pairs:
+                s_hash = _sentence_hash(sentence)
+                if self.store.save_sentence_version(s_hash, sentence):
+                    registered_new += 1
+                else:
+                    registered_existing += 1
+            logger.info(
+                "Chapter %d sentence text history: %d new, %d already known.",
+                chapter_idx, registered_new, registered_existing,
+            )
 
         # Synthesise missing chunks (file existence = already done).
         synthesised = 0
