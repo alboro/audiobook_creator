@@ -646,22 +646,10 @@ function reviewApp() {
         return;
       }
 
-      // If a playlist is active and the clicked chunk is in it, jump within
-      // the playlist WITHOUT changing the mode or filter.
+      // Individual chunk button always stops any active playlist/autoplay
+      // and plays just this one chunk (no auto-advance).
       if (this._isPlaylistActive()) {
-        const pos = this.playlist.indices.indexOf(i);
-        if (pos >= 0) {
-          this.playlist.pos = pos;
-          this.playingIdx = i;
-          this.lastPlayedIdx = i;
-          this._savePos();
-          const lbl = (this.playlist.mode === 'disputed' ? '🔴 ' : '') + '#' + (i + 1) + ' ' + c.text.slice(0, 50);
-          this._playMain(this._url(c.hash), lbl);
-          return;
-        }
-        // Clicked a chunk that is NOT in the current playlist → exit playlist
-        // and fall through to plain manual play.
-        this._stopPlaylist();
+        this.playlist = { mode: null, indices: [], pos: -1 };
       }
 
       this.playingIdx = i;
