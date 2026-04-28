@@ -142,6 +142,21 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
     text = Path(text_path).read_text(encoding="utf-8")
     voice2 = _config_voice_name2()
     pairs = split_sentences_with_voices(text, "ru", voice2=voice2)
+
+    # Load auto-retry counts from DB (if DB exists)
+    retry_counts: dict[str, int] = {}
+    db_path = _audio_db_path(dir)
+    if Path(db_path).exists():
+        try:
+            store = AudioChunkStore(db_path)
+            for _chunk, _ in pairs:
+                h = _sentence_hash(_chunk)
+                cnt = store.get_auto_deletion_count(h)
+                if cnt:
+                    retry_counts[h] = cnt
+        except Exception:
+            pass
+
     result = []
     for i, (chunk, voice) in enumerate(pairs):
         h = _sentence_hash(chunk)
@@ -153,6 +168,8 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
             "has_audio": audio_path is not None,
             # voice is None for default voice; non-None means voice2 is used for this chunk
             "voice": voice,
+            # how many times this chunk was auto-deleted and re-synthesised (0 = never)
+            "auto_retry_count": retry_counts.get(h, 0),
         })
     return result
 

@@ -79,6 +79,18 @@ class AudioChunkStore:
                     status        TEXT,
                     PRIMARY KEY (chapter_key, sentence_hash)
                 );
+
+                CREATE TABLE IF NOT EXISTS chunk_auto_deletions (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chapter_key   TEXT NOT NULL,
+                    sentence_hash TEXT NOT NULL,
+                    deleted_at    TEXT NOT NULL,
+                    similarity    REAL,
+                    threshold     REAL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_auto_deletions
+                    ON chunk_auto_deletions (sentence_hash);
                 """
             )
             conn.commit()
@@ -403,3 +415,61 @@ class AudioChunkStore:
                 "Resolved disputed chunk chapter=%s hash=%s updated=%d",
                 chapter_key, sentence_hash[:8], cur.rowcount,
             )
+
+    # ------------------------------------------------------------------
+    # Auto-retry deletion tracking
+    # ------------------------------------------------------------------
+
+    def record_auto_deletion(
+        self,
+        chapter_key: str,
+        sentence_hash: str,
+        similarity: float,
+        threshold: float,
+    ) -> None:
+        """Record that an audio chunk was automatically deleted for re-synthesis.
+
+        Each call appends one row; the row count serves as the retry counter.
+        """
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO chunk_auto_deletions
+                    (chapter_key, sentence_hash, deleted_at, similarity, threshold)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (chapter_key, sentence_hash, _utc_now(), similarity, threshold),
+            )
+            conn.commit()
+        logger.debug(
+            "Recorded auto-deletion chapter=%s hash=%s sim=%.2f threshold=%.2f",
+            chapter_key, sentence_hash[:8], similarity, threshold,
+        )
+
+    def get_auto_deletion_count(self, sentence_hash: str) -> int:
+        """Return how many times this chunk was automatically deleted for re-synthesis."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM chunk_auto_deletions WHERE sentence_hash = ?",
+                (sentence_hash,),
+            ).fetchone()
+        return int(row["cnt"]) if row else 0
+
+    def get_all_failed_chunks(self, threshold: float) -> List[sqlite3.Row]:
+        """Return all chunk_cache rows with similarity < threshold that are not resolved.
+
+        Used by audio_auto mode to find chunks that need re-synthesis.
+        """
+        with closing(self._connect()) as conn:
+            return conn.execute(
+                """
+                SELECT chapter_key, sentence_hash, similarity, original_text
+                FROM chunk_cache
+                WHERE similarity IS NOT NULL
+                  AND similarity < ?
+                  AND (status IS NULL OR status != ?)
+                ORDER BY chapter_key, similarity ASC
+                """,
+                (threshold, STATUS_RESOLVED),
+            ).fetchall()
+

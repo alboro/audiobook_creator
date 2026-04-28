@@ -34,7 +34,7 @@ def handle_args():
     )
     parser.add_argument(
         "--mode",
-        choices=["prepare", "audio", "audio_chunks", "package", "all", "audio_check"],
+        choices=["prepare", "audio", "audio_chunks", "package", "all", "audio_check", "audio_auto"],
         required=True,
         help=(
             "Generation stage to run:\n"
@@ -46,7 +46,10 @@ def handle_args():
             "  package      — package existing chapter audio files in output_folder into a single .m4b;\n"
             "  all          — normalize + synthesize + package in one pass (full pipeline).\n"
             "  audio_check  — transcribe existing audio chunks locally with Whisper and mark\n"
-            "                 mismatches as disputed in the DB for manual review."
+                 "                 mismatches as disputed in the DB for manual review.\n"
+                 "  audio_auto   — auto-loop: synthesise → check → delete failed → repeat\n"
+                 "                 up to audio_auto_retry times until all chunks pass\n"
+                 "                 audio_auto_check_threshold (default: 0.78)."
         ),
     )
     parser.add_argument(
@@ -64,6 +67,22 @@ def handle_args():
         "--audio_check_device",
         default=None,
         help="Inference device for Whisper: cpu or cuda (default: cpu).",
+    )
+    parser.add_argument(
+        "--audio_auto_check_threshold",
+        type=float,
+        default=None,
+        help=(
+            "Similarity threshold for --mode audio_auto: chunks below this are deleted and "
+            "re-synthesised automatically (default: 0.78).  Lower than audio_check_threshold "
+            "so only clearly bad chunks are retried unattended."
+        ),
+    )
+    parser.add_argument(
+        "--audio_auto_retry",
+        type=int,
+        default=None,
+        help="Maximum number of re-synthesis attempts per chunk in --mode audio_auto (default: 5).",
     )
     parser.add_argument(
         "--tts",
@@ -646,6 +665,137 @@ def handle_args():
     return GeneralConfig(args)
 
 
+def _run_audio_auto(config):
+    """Auto-loop mode: synthesise → check → delete failed chunks → repeat.
+
+    Runs up to ``audio_auto_retry`` iterations.  In each iteration:
+      1. Synthesise any missing/deleted chunks (audio_chunks mode, skips existing files).
+      2. Transcribe all chunks with Whisper and record similarity scores.
+      3. Delete chunk audio files whose similarity < ``audio_auto_check_threshold``.
+         Each deletion is recorded in the DB so the Review UI can show retry counts.
+      4. If no chunks were deleted → all pass; stop.
+      5. After ``audio_auto_retry`` retries → warn and stop (remaining bad chunks
+         stay visible in the Review UI as disputed for manual inspection).
+    """
+    import copy
+    import logging as _logging
+    from pathlib import Path as _Path
+
+    from audiobook_generator.core.audio_checker import AudioChecker
+    from audiobook_generator.core.audio_chunk_store import AudioChunkStore
+    from audiobook_generator.core.audiobook_generator import AudiobookGenerator
+
+    _log = _logging.getLogger(__name__)
+
+    auto_threshold = float(getattr(config, "audio_auto_check_threshold", None) or 0.78)
+    max_retry = int(getattr(config, "audio_auto_retry", None) or 5)
+
+    output_folder = _Path(config.output_folder).resolve()
+    db_path = output_folder / "wav" / "_state" / "audio_chunks.sqlite3"
+
+    _log.info(
+        "=== audio_auto: threshold=%.2f  max_retry=%d ===",
+        auto_threshold, max_retry,
+    )
+
+    _AUDIO_EXTS = ["wav", "mp3", "ogg", "opus", "m4a", "flac"]
+    chunks_root = output_folder / "wav" / "chunks"
+
+    for attempt in range(1, max_retry + 2):   # attempt 1 … max_retry+1
+        _log.info("--- audio_auto: attempt %d ---", attempt)
+
+        # ── Step 1: Synthesise ────────────────────────────────────────────────
+        synth_cfg = copy.copy(config)
+        synth_cfg.mode = "audio_chunks"
+        synth_cfg.package_m4b = False
+        synth_cfg.normalize = False
+        synth_cfg.chunked_audio = True
+        AudiobookGenerator(synth_cfg).run()
+
+        # ── Step 2: audio_check ───────────────────────────────────────────────
+        if not db_path.exists():
+            raise FileNotFoundError(
+                f"No audio DB at {db_path}. Run --mode audio_chunks first."
+            )
+        store = AudioChunkStore(db_path)
+        checker = AudioChecker(
+            output_folder=output_folder,
+            model_size=getattr(config, "audio_check_model", None) or "small",
+            language=getattr(config, "language", "ru"),
+            threshold=auto_threshold,
+            device=getattr(config, "audio_check_device", None) or "cpu",
+            config=config,
+        )
+        checker.run(store)
+
+        # ── Step 3: Find failed chunks ────────────────────────────────────────
+        failed_rows = store.get_all_failed_chunks(auto_threshold)
+        # Keep only rows whose audio file actually exists on disk
+        failed: list[tuple] = []
+        for row in failed_rows:
+            chapter_key = row["chapter_key"]
+            s_hash = row["sentence_hash"]
+            similarity = row["similarity"]
+            for ext in _AUDIO_EXTS:
+                p = chunks_root / chapter_key / f"{s_hash}.{ext}"
+                if p.exists():
+                    failed.append((chapter_key, s_hash, similarity, str(p)))
+                    break
+
+        if not failed:
+            _log.info(
+                "=== audio_auto: ✅ all chunks pass threshold %.2f after %d attempt(s) ===",
+                auto_threshold, attempt,
+            )
+            break
+
+        if attempt > max_retry:
+            _log.warning(
+                "=== audio_auto: ⚠ max retries (%d) reached; "
+                "%d chunk(s) still below threshold %.2f — manual review recommended ===",
+                max_retry, len(failed), auto_threshold,
+            )
+            break
+
+        # ── Step 4: Delete failed chunks & record in history ──────────────────
+        deleted = 0
+        for chapter_key, s_hash, similarity, audio_path in failed:
+            try:
+                _Path(audio_path).unlink()
+                store.record_auto_deletion(chapter_key, s_hash, similarity, auto_threshold)
+                deleted += 1
+                _log.info(
+                    "  Deleted %s/%s (sim=%.2f < %.2f) — queued for re-synthesis",
+                    chapter_key, s_hash[:10], similarity, auto_threshold,
+                )
+            except Exception as exc:
+                _log.warning("  Failed to delete %s: %s", audio_path, exc)
+
+        _log.info(
+            "--- audio_auto: deleted %d chunk(s), starting attempt %d ---",
+            deleted, attempt + 1,
+        )
+
+    # Final audio_check at the normal threshold so the Review UI reflects the
+    # true (possibly lower) threshold configured by the user.
+    normal_threshold = float(getattr(config, "audio_check_threshold", None) or 0.70)
+    if normal_threshold != auto_threshold:
+        _log.info(
+            "=== audio_auto: running final audio_check at normal threshold %.2f ===",
+            normal_threshold,
+        )
+        store2 = AudioChunkStore(db_path)
+        checker2 = AudioChecker(
+            output_folder=output_folder,
+            model_size=getattr(config, "audio_check_model", None) or "small",
+            language=getattr(config, "language", "ru"),
+            threshold=normal_threshold,
+            device=getattr(config, "audio_check_device", None) or "cpu",
+            config=config,
+        )
+        checker2.run(store2)
+
+
 def _run_audio_check(config):
     """Run audio_check mode: transcribe chunks and mark disputed ones."""
     from audiobook_generator.core.audio_checker import AudioChecker
@@ -692,6 +842,10 @@ def main(config=None, log_file=None):
 
     if getattr(config, "mode", None) == "audio_check":
         _run_audio_check(config)
+        return
+
+    if getattr(config, "mode", None) == "audio_auto":
+        _run_audio_auto(config)
         return
 
     AudiobookGenerator(config).run()

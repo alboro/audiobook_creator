@@ -42,6 +42,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-siz
 .chunk-row.disputed{background:#1f1418;border-left:3px solid #f38ba8;padding-left:11px}
 .disputed-badge{display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;color:#f38ba8;background:#2a1520;border:1px solid #4a2535;border-radius:10px;padding:1px 6px;margin-left:6px;vertical-align:middle}
 .voice-badge{display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:600;color:#89dceb;background:#0d2030;border:1px solid #1e4060;border-radius:10px;padding:1px 6px;margin-left:6px;vertical-align:middle}
+.retry-badge{display:inline-flex;align-items:center;font-size:9px;font-weight:700;color:#f9e2af;background:#2a2010;border:1px solid #5a4a20;border-radius:10px;padding:1px 6px;margin-left:4px;vertical-align:middle;title:"auto-retry count"}
 .disputed-panel{margin-top:6px;border-top:1px solid #313244;padding-top:6px}
 .disp-sim{font-size:9px;color:#f38ba8;font-family:monospace;margin-bottom:3px}
 .disp-transcription{font-size:11px;color:#fab387;line-height:1.4;white-space:pre-wrap;word-break:break-word;border-left:2px solid #f38ba8;padding-left:6px;margin-top:3px}
@@ -172,8 +173,16 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
                 <template x-if="chunk.has_audio">
                   <a class="chash" :href="_url(chunk.hash)" download x-text="chunk.hash.slice(0,8)"></a>
                 </template>
+                <template x-if="chunk.has_audio && chunk.auto_retry_count > 0">
+                  <span class="retry-badge" :title="'re-synthesised ' + chunk.auto_retry_count + ' time(s)'" x-text="'↻' + chunk.auto_retry_count"></span>
+                </template>
                 <template x-if="!chunk.has_audio">
-                  <div class="chash" x-text="chunk.hash.slice(0,8) + ' · no audio'"></div>
+                  <div class="chash" style="display:inline">
+                    <span x-text="chunk.hash.slice(0,8) + ' · no audio'"></span>
+                    <template x-if="chunk.auto_retry_count > 0">
+                      <span class="retry-badge" :title="'auto-deleted ' + chunk.auto_retry_count + ' time(s) for re-synthesis'" x-text="'↻' + chunk.auto_retry_count"></span>
+                    </template>
+                  </div>
                 </template>
               </div>
             </template>
