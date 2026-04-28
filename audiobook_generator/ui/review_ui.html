@@ -867,12 +867,14 @@ function reviewApp() {
 
     chapterDisplayTitle() {
       if (!this.currentChapter) return '';
-      const override = this.chapterTitleOverrides[this.currentChapter.idx - 1];
+      const pos = this.chapters.findIndex(c => c.key === this.currentChapter.key);
+      const override = pos >= 0 ? this.chapterTitleOverrides[pos] : null;
       return override || this.currentChapter.title;
     },
 
     chapterTitleHint() {
-      const override = this.currentChapter ? this.chapterTitleOverrides[this.currentChapter.idx - 1] : null;
+      const pos = this.currentChapter ? this.chapters.findIndex(c => c.key === this.currentChapter.key) : -1;
+      const override = pos >= 0 ? this.chapterTitleOverrides[pos] : null;
       return override
         ? '✎ Override active. Click to edit m4b chapter title'
         : '✎ Click to set m4b chapter title override';
@@ -880,7 +882,8 @@ function reviewApp() {
 
     startChapterTitleEdit() {
       if (!this.currentChapter) return;
-      const override = this.chapterTitleOverrides[this.currentChapter.idx - 1];
+      const pos = this.chapters.findIndex(c => c.key === this.currentChapter.key);
+      const override = pos >= 0 ? this.chapterTitleOverrides[pos] : null;
       this.chapterTitleText = override || this.currentChapter.title;
       this.chapterTitleEditing = true;
     },
@@ -893,17 +896,18 @@ function reviewApp() {
     async saveChapterTitle() {
       if (!this.currentChapter) return;
       const title = this.chapterTitleText.trim();
+      const pos = this.chapters.findIndex(c => c.key === this.currentChapter.key);
+      if (pos < 0) return;
       try {
         const r = await fetch('/api/chapter_title', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dir: this.outputDir, chapter_idx: this.currentChapter.idx, title }),
+          body: JSON.stringify({ dir: this.outputDir, chapter_pos: pos, title }),
         });
         if (!r.ok) throw new Error(await r.text());
         const overrides = [...this.chapterTitleOverrides];
-        const lineIdx = this.currentChapter.idx - 1;
-        while (overrides.length <= lineIdx) overrides.push('');
-        overrides[lineIdx] = title;
+        while (overrides.length <= pos) overrides.push('');
+        overrides[pos] = title;
         this.chapterTitleOverrides = overrides;
         this.cancelChapterTitleEdit();
         this.st('Chapter title saved');

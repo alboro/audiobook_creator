@@ -370,13 +370,16 @@ async def get_chapter_titles(dir: str = ""):
 
 class SaveChapterTitleRequest(BaseModel):
     dir: str = ""
-    chapter_idx: int   # 1-based, as returned by /api/chapters
+    chapter_pos: int   # 0-based position in the sorted chapters list (matches _apply_chapter_title_overrides)
     title: str
 
 
 @app.post("/api/chapter_title")
 async def save_chapter_title(req: SaveChapterTitleRequest):
     """Write a chapter title override into chapter_titles_file (one title per line).
+
+    Line index = chapter_pos (0-based position in the sorted chapters list), matching
+    the same indexing used by _apply_chapter_title_overrides at packaging time.
 
     If chapter_titles_file is not configured in INI, the file is auto-created at
     <output_dir>/text/<latest_run>/chapter_titles.txt.
@@ -396,9 +399,9 @@ async def save_chapter_title(req: SaveChapterTitleRequest):
         except Exception as e:
             raise HTTPException(500, f"Cannot read chapter_titles_file: {e}")
 
-    line_idx = req.chapter_idx - 1  # convert to 0-based
+    line_idx = req.chapter_pos
     if line_idx < 0:
-        raise HTTPException(400, "chapter_idx must be >= 1")
+        raise HTTPException(400, "chapter_pos must be >= 0")
 
     while len(existing) <= line_idx:
         existing.append("")
