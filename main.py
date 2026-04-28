@@ -34,7 +34,7 @@ def handle_args():
     )
     parser.add_argument(
         "--mode",
-        choices=["prepare", "audio", "audio_chunks", "package", "all", "audio_check", "audio_auto"],
+        choices=["prepare", "audio", "audio_chunks", "audio_worker", "package", "all", "audio_check", "audio_auto"],
         required=True,
         help=(
             "Generation stage to run:\n"
@@ -43,6 +43,10 @@ def handle_args():
             "                 when chunked_audio=true, skips re-merging chapters whose WAV is already up-to-date;\n"
             "  audio_chunks — synthesise per-sentence chunk files only (no chapter merge).\n"
             "                 Useful to synthesise first and merge with --mode audio afterwards;\n"
+            "  audio_worker — like audio_chunks but runs in an infinite loop, sleeping\n"
+            "                 audio_worker_interval seconds between passes.\n"
+            "                 Keeps synthesising any new/missing chunks as they appear.\n"
+            "                 Stop with Ctrl+C — current chunk finishes before exit;\n"
             "  package      — package existing chapter audio files in output_folder into a single .m4b;\n"
             "  all          — normalize + synthesize + package in one pass (full pipeline).\n"
             "  audio_check  — transcribe existing audio chunks locally with Whisper and mark\n"
@@ -208,6 +212,16 @@ def handle_args():
             "Incompatible with --mode audio_check (which requires the DB). "
             "Useful when you only need the audio files and do not intend to use "
             "the Review UI or audio quality check features."
+        ),
+    )
+    parser.add_argument(
+        "--audio_worker_interval",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Seconds to sleep between synthesis passes in --mode audio_worker. "
+            "Default: 30. Can also be set in INI as [m4b] audio_worker_interval = N."
         ),
     )
     parser.add_argument(
@@ -832,6 +846,53 @@ def _run_audio_check(config):
     checker.run(store)
 
 
+def _run_audio_worker(config):
+    """Run audio_worker mode: synthesise missing chunks in an infinite loop.
+
+    Each pass is identical to --mode audio_chunks (skips already-present files).
+    Sleeps *audio_worker_interval* seconds between passes.
+    Stops cleanly on Ctrl+C — any chunk currently being synthesised finishes
+    before the process exits.
+    """
+    import copy
+    import time
+
+    poll_interval = int(getattr(config, "audio_worker_interval", None) or 30)
+
+    print(f"\n[audio_worker] Book : {config.output_folder}")
+    print(f"[audio_worker] Interval: {poll_interval}s between passes")
+    print("[audio_worker] Press Ctrl+C to stop (current chunk will finish first).\n")
+
+    pass_num = 0
+    try:
+        while True:
+            pass_num += 1
+            logger.info("=== audio_worker: pass %d ===", pass_num)
+
+            synth_cfg = copy.copy(config)
+            synth_cfg.mode = "audio_chunks"
+            synth_cfg.package_m4b = False
+            synth_cfg.normalize = False
+            synth_cfg.no_prompt = True
+
+            try:
+                from audiobook_generator.core.audiobook_generator import AudiobookGenerator
+                AudiobookGenerator(synth_cfg).run()
+            except KeyboardInterrupt:
+                raise  # propagate to outer handler
+            except Exception as exc:
+                logger.error("audio_worker: pass %d error: %s", pass_num, exc)
+
+            logger.info(
+                "=== audio_worker: pass %d done — sleeping %ds ===",
+                pass_num, poll_interval,
+            )
+            time.sleep(poll_interval)
+
+    except KeyboardInterrupt:
+        print(f"\n[audio_worker] Stopped after {pass_num} pass(es).")
+
+
 def main(config=None, log_file=None):
     if not config: # config passed from UI, or uses args if CLI
         config = handle_args()
@@ -857,6 +918,10 @@ def main(config=None, log_file=None):
 
     if getattr(config, "mode", None) == "audio_auto":
         _run_audio_auto(config)
+        return
+
+    if getattr(config, "mode", None) == "audio_worker":
+        _run_audio_worker(config)
         return
 
     AudiobookGenerator(config).run()

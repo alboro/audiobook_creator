@@ -137,6 +137,7 @@ FIELD_SECTIONS: Dict[str, str] = {
     "package_m4b": "m4b",
     "chunked_audio": "m4b",
     "chunked_audio_no_db": "m4b",
+    "audio_worker_interval": "m4b",
     "audio_folder": "m4b",
     "m4b_filename": "m4b",
     "m4b_bitrate": "m4b",
