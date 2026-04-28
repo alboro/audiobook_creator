@@ -8,6 +8,7 @@ import pytest
 from audiobook_generator.core.chunked_audio_generator import (
     _is_fully_quoted,
     _find_quoted_span,
+    _merge_close_quote_artifacts,
     split_sentences_with_voices,
     split_into_sentences,
 )
@@ -406,6 +407,115 @@ class TestCloseQuoteArtifact:
             'Подобно квакерам, Пэйн употреблял "слово Божие".',
         ]
         assert _find_quoted_span(sentences, 0) is None
+
+
+# ---------------------------------------------------------------------------
+# _merge_close_quote_artifacts — re-attaching filtered close-quote artifacts
+# ---------------------------------------------------------------------------
+
+class TestMergeCloseQuoteArtifacts:
+    """sentencex treats '?' and '!' as EOS even inside a quoted block.
+    The closing quote then lands in a tiny 1-2 char fragment that would
+    otherwise be filtered by MIN_SENTENCE_CHARS and lost to _find_quoted_span."""
+
+    def test_typographic_close_merges_after_question_mark(self):
+        sentences = [
+            "именно со стороны тех самых людей во всех уголках королевства?",
+            "\u201d.",          # tiny close-quote artifact
+            "После казни Людовика Шестнадцатого.",
+        ]
+        result = _merge_close_quote_artifacts(sentences)
+        assert result[0].endswith("?\u201d."), (
+            f"Expected close quote merged onto previous sentence, got: {result[0]!r}"
+        )
+        assert result[1] == "После казни Людовика Шестнадцатого."
+
+    def test_straight_quote_merges_after_exclamation(self):
+        sentences = [
+            'человек вернётся к вере в одного Бога, и не более!',
+            '".',               # short close-quote artifact (straight quote)
+            'Он говорит Сэмюэлу Адамсу.',
+        ]
+        result = _merge_close_quote_artifacts(sentences)
+        assert result[0].endswith('!".'), (
+            f"Expected '\".' merged, got: {result[0]!r}"
+        )
+        assert result[1] == "Он говорит Сэмюэлу Адамсу."
+
+    def test_long_sentence_starting_with_quote_not_merged(self):
+        """'". Narrator text…' is NOT a close-quote artifact — it has real content."""
+        sentences = [
+            "Предыдущее предложение.",
+            '". Он говорит Сэмюэлу Адамсу.',
+        ]
+        result = _merge_close_quote_artifacts(sentences)
+        assert result == sentences  # unchanged
+
+    def test_no_merge_when_only_one_sentence(self):
+        sentences = ["\u201d."]
+        result = _merge_close_quote_artifacts(sentences)
+        assert result == ["\u201d."]  # nothing to merge into
+
+
+# ---------------------------------------------------------------------------
+# Regression: '?' inside block quote → sentencex strips closing quote artifact
+# — the quote block content must still get voice2 and narrator must not.
+# ---------------------------------------------------------------------------
+
+# Reproduces the exact user text:
+# "Но рассматриваемый нами предмет…[chunk_eof]…королевства?".
+# После казни Людовика…[chunk_eof]…конституции.
+PAINE_QUESTION_MARK_QUOTE = (
+    "\u201c\u041d\u043e \u0440\u0430\u0441\u0441\u043c\u0430\u0442\u0440\u0438\u0432"
+    "\u0430\u0435\u043c\u044b\u0439 \u043d\u0430\u043c\u0438 \u043f\u0440\u0435\u0434"
+    "\u043c\u0435\u0442 \u0434\u043e\u043f\u0443\u0441\u043a\u0430\u0435\u0442 \u0440"
+    "\u0430\u0437\u044a\u044f\u0441\u043d\u0435\u043d\u0438\u0435 \u043d\u0430 \u043f"
+    "\u0440\u0438\u043c\u0435\u0440\u0435 \u0441\u0430\u043c\u043e\u0433\u043e \u043c"
+    "\u0438\u0441\u0442\u0435\u0440\u0430 \u041f\u044d\u0439\u043d\u0430."
+    " \u0412 \u044d\u0442\u043e\u0439 \u0441\u0442\u0440\u0430\u043d\u0435, \u0433\u0434"
+    "\u0435 \u0435\u0433\u043e \u043f\u0440\u043e\u0442\u0438\u0432\u043e\u0434\u0435"
+    "\u0439\u0441\u0442\u0432\u0438\u0435 \u043f\u043e\u0440\u043e\u043a\u0430\u043c"
+    " \u0433\u043e\u0441\u0443\u0434\u0430\u0440\u0441\u0442\u0432\u0435\u043d\u043d"
+    "\u043e\u0433\u043e \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f"
+    " \u0441\u043e\u0437\u0434\u0430\u043b\u043e \u0435\u043c\u0443 \u0441\u0442\u043e"
+    "\u043b\u044c \u043c\u043d\u043e\u0433\u0438\u0445 \u0432\u0440\u0430\u0433\u043e\u0432,"
+    + CHUNK_EOF_TAG
+    + " \u0438\u043c\u0435\u043d\u043d\u043e \u0441\u043e \u0441\u0442\u043e\u0440\u043e"
+    "\u043d\u044b \u0442\u0435\u0445 \u0441\u0430\u043c\u044b\u0445 \u043b\u044e\u0434"
+    "\u0435\u0439, \u0432\u043e \u0432\u0441\u0435\u0445 \u0443\u0433\u043e\u043b\u043a"
+    "\u0430\u0445 \u043a\u043e\u0440\u043e\u043b\u0435\u0432\u0441\u0442\u0432\u0430?\u201d."
+    "\n\n"
+    "\u041f\u043e\u0441\u043b\u0435 \u043a\u0430\u0437\u043d\u0438 \u041b\u044e\u0434"
+    "\u043e\u0432\u0438\u043a\u0430 \u0428\u0435\u0441\u0442\u043d\u0430\u0434\u0446"
+    "\u0430\u0442\u043e\u0433\u043e, \u0437\u0430 \u0447\u044c\u044e \u0436\u0438\u0437"
+    "\u043d\u044c \u041f\u044d\u0439\u043d \u0442\u0430\u043a \u0433\u043e\u0440\u044f"
+    "\u0447\u043e \u0445\u043e\u0434\u0430\u0442\u0430\u0439\u0441\u0442\u0432\u043e"
+    "\u0432\u0430\u043b."
+)
+
+
+class TestQuestionMarkInsideQuote:
+    def test_quoted_block_content_gets_voice2(self):
+        """The quoted speech block (starting with open-typographic-quote) must get voice2."""
+        pairs = split_sentences_with_voices(PAINE_QUESTION_MARK_QUOTE, "ru", voice2="v2")
+        voice2_pairs = [(t, v) for t, v in pairs if v == "v2"]
+        assert len(voice2_pairs) >= 1, (
+            "Expected ≥1 sentence with voice2 from the quoted block, "
+            f"got none. All pairs:\n" + "\n".join(f"  {t[:60]!r}" for t, _ in pairs)
+        )
+
+    def test_narrator_after_closing_quote_gets_no_voice2(self):
+        """'После казни…' is narrator text — must NOT get voice2."""
+        pairs = split_sentences_with_voices(PAINE_QUESTION_MARK_QUOTE, "ru", voice2="v2")
+        # "После казни" in unicode
+        narrator_bad = [
+            (t, v) for t, v in pairs
+            if v == "v2" and "\u041f\u043e\u0441\u043b\u0435 \u043a\u0430\u0437\u043d\u0438" in t
+        ]
+        assert not narrator_bad, (
+            "Narrator sentence 'После казни…' must have voice=None, "
+            f"but got voice2. Pairs:\n" + "\n".join(f"  {t[:70]!r}: {v!r}" for t, v in narrator_bad)
+        )
 
 
 if __name__ == "__main__":

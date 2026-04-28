@@ -57,14 +57,54 @@ _OPEN_QUOTES = {p[0] for p in _QUOTE_PAIRS}
 # Mapping open → close
 _CLOSE_FOR_OPEN = {p[0]: p[1] for p in _QUOTE_PAIRS}
 
+# Regex that matches a *close-quote artifact* sentence: a very short fragment that
+# consists only of a closing quote character optionally followed by sentence-ending
+# punctuation.  These are produced when sentencex treats "?" or "!" inside a quoted
+# block as an EOS, leaving the closing quote character in its own tiny fragment.
+# Example: from «…королевства?». sentencex yields «…королевства?» + «».»
+# The second fragment must be re-attached to the previous sentence so that
+# _find_quoted_span can still locate the end of the quoted span.
+_CLOSE_QUOTE_ARTIFACT_RE = re.compile(
+    r'^[\u00bb\u201d\u2019"][\s.!?,;:…\-]*$'
+)
+
+
+def _merge_close_quote_artifacts(sentences: List[str]) -> List[str]:
+    """Re-attach orphaned close-quote artifact sentences to the preceding sentence.
+
+    When sentencex splits on ``?`` or ``!`` inside a quoted block, the closing
+    quote character (e.g. ``\u201d.`` or ``".``) ends up as a tiny fragment that
+    would otherwise be filtered out by the ``MIN_SENTENCE_CHARS`` threshold,
+    making ``_find_quoted_span`` unable to locate the end of the span.
+
+    This function finds such fragments and merges them back onto the previous
+    sentence so that the close-quote character remains visible to span detection.
+    """
+    if len(sentences) < 2:
+        return sentences
+    result: List[str] = []
+    for s in sentences:
+        stripped = s.strip()
+        if result and stripped and _CLOSE_QUOTE_ARTIFACT_RE.match(stripped):
+            result[-1] = result[-1].rstrip() + stripped
+        else:
+            result.append(s)
+    return result
+
 
 def split_into_sentences(text: str, language: str = "ru") -> List[str]:
     """Split *text* into sentences using sentencex.
 
     Falls back to splitting on double-newlines if sentencex is not available.
+
+    Close-quote artifact fragments (e.g. ``\u201d.`` produced when sentencex
+    treats ``?`` or ``!`` inside a quoted block as an EOS) are silently
+    re-attached to the preceding sentence before the length filter is applied,
+    so that ``_find_quoted_span`` can still detect the quoted-block boundary.
     """
-    sentences = split_text_by_chunk_boundaries(text, language)
-    return [s for s in sentences if len(s.strip()) >= MIN_SENTENCE_CHARS]
+    raw = split_text_by_chunk_boundaries(text, language)
+    raw = _merge_close_quote_artifacts(raw)
+    return [s for s in raw if len(s.strip()) >= MIN_SENTENCE_CHARS]
 
 
 def _is_fully_quoted(text: str) -> Optional[Tuple[str, str]]:
