@@ -72,12 +72,20 @@ def _is_fully_quoted(text: str) -> Optional[Tuple[str, str]]:
 
     Allows optional punctuation after the closing quote (e.g. «...». ).
     Returns None if not a quoted block.
+
+    Also returns None when the opening quote character is immediately followed by
+    punctuation or whitespace (e.g. ``". Narrator text...``) — that pattern indicates
+    a *closing* quote artifact left over from a sentence split, not a real opening.
     """
     t = text.strip()
     if not t:
         return None
     open_char = t[0]
     if open_char not in _OPEN_QUOTES:
+        return None
+    # Reject closing-quote artifacts: a real opening quote is followed by word content,
+    # not by punctuation or whitespace (e.g. '". Narrator …' is a close-quote leftover).
+    if len(t) < 2 or t[1] in '.!?,;: \t':
         return None
     close_char = _CLOSE_FOR_OPEN[open_char]
     # Find last occurrence of closing quote (may be followed by punctuation/space)
@@ -92,22 +100,28 @@ def _is_fully_quoted(text: str) -> Optional[Tuple[str, str]]:
     return (open_char, close_char)
 
 
-def _find_quoted_span(sentences: List[str], start: int) -> Optional[int]:
-    """If ``sentences[start]`` opens a quoted block that is closed in a later sentence,
-    return the exclusive end index of the span, otherwise return None.
+def _find_quoted_span(
+    sentences: List[str], start: int
+) -> Optional[Tuple[int, Optional[str], Optional[str]]]:
+    """If ``sentences[start]`` opens a quoted block closed in a later sentence, return
+    ``(span_end, voiced_last, unvoiced_rest)``; otherwise return ``None``.
 
-    This handles the case where a ``[chunk_eof]`` tag splits a quoted block so that the
-    opening and closing quotes land in different sentence items.  ``_is_fully_quoted``
-    cannot detect such spans because it only inspects a single sentence.
+    * **span_end** – exclusive index of the span (sentences[start:span_end] are in-quote).
+    * **voiced_last** / **unvoiced_rest** – when the sentence that contains the closing
+      quote also has narrator text *after* it (e.g. ``…церкви". Плут, переписывавший…``),
+      the sentence is split here:  ``voiced_last`` = portion up to and including the
+      closing quote + any immediately trailing punctuation; ``unvoiced_rest`` = the
+      narrator text that follows.  Both are ``None`` when the sentence ends cleanly
+      after the closing quote.
 
-    The function considers ``sentences[start]`` as an unclosed opener only when the
-    opening quote char is found at the start of the stripped text **and** no matching
-    closing quote follows within the same sentence.  It then scans forward until it
-    finds a sentence whose stripped text contains the closing quote, after which only
-    punctuation / whitespace appear.
+    Uses the **first** occurrence of the closing quote char (not the last) so that a
+    close-quote mid-sentence is not confused with a later quote-within-quote.
     """
     t = sentences[start].strip()
     if not t or t[0] not in _OPEN_QUOTES:
+        return None
+    # Same closing-quote-artifact guard as _is_fully_quoted.
+    if len(t) < 2 or t[1] in '.!?,;: \t':
         return None
     open_char = t[0]
     close_char = _CLOSE_FOR_OPEN[open_char]
@@ -116,13 +130,26 @@ def _find_quoted_span(sentences: List[str], start: int) -> Optional[int]:
         return None
     for end in range(start + 1, len(sentences)):
         sent = sentences[end].strip()
-        if close_char in sent:
-            idx = sent.rfind(close_char)
-            after = sent[idx + 1:].strip()
-            if not after or re.fullmatch(r'[\s.,!?;:\-…]+', after):
-                return end + 1  # exclusive end of the span
-            # Closing char found but followed by non-punctuation — not a clean close.
-            return None
+        if close_char not in sent:
+            continue
+        # Use the FIRST occurrence so we don't skip past a mid-sentence close.
+        idx = sent.find(close_char)
+        tail = sent[idx + 1:]
+        tail_stripped = tail.strip()
+        if not tail_stripped or re.fullmatch(r'[\s.,!?;:\-…]+', tail_stripped):
+            # Clean close — nothing substantive follows the closing quote.
+            return (end + 1, None, None)
+        # The closing quote is somewhere mid-sentence; split at that point.
+        # Absorb any punctuation immediately after the close quote into the voiced part.
+        punct_match = re.match(r'^[\s.,!?;:\-…]*', tail)
+        punct_suffix = punct_match.group(0).rstrip()   # e.g. "." (no trailing space)
+        voiced_last = sent[:idx + 1] + punct_suffix
+        # Remainder starts after the consumed punctuation + whitespace.
+        remainder_start = idx + 1 + len(punct_match.group(0))
+        unvoiced_rest = sent[remainder_start:].strip()
+        if not unvoiced_rest:
+            return (end + 1, None, None)
+        return (end + 1, voiced_last, unvoiced_rest)
     return None
 
 
@@ -176,14 +203,22 @@ def split_sentences_with_voices(
         elif voice2:
             # Detect a quoted block split by [chunk_eof]: the opening and closing quotes
             # appear in different sentence items after boundary splitting.
-            span_end = _find_quoted_span(sentences, i)
-            if span_end is not None:
+            span_result = _find_quoted_span(sentences, i)
+            if span_result is not None:
+                span_end, voiced_last, unvoiced_rest = span_result
                 logger.debug(
                     "Cross-boundary quoted span sentences %d..%d assigned voice2=%s: %s…",
                     i, span_end - 1, voice2, sentence[:60],
                 )
-                for k in range(i, span_end):
+                # All sentences in the span except the last get voice2 unchanged.
+                for k in range(i, span_end - 1):
                     result.append((sentences[k], voice2))
+                # Last sentence in span: may need to be split.
+                if voiced_last is not None:
+                    result.append((voiced_last, voice2))
+                    result.append((unvoiced_rest, None))
+                else:
+                    result.append((sentences[span_end - 1], voice2))
                 i = span_end
                 continue
             result.append((sentence, None))

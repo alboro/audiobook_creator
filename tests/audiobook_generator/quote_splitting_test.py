@@ -46,6 +46,18 @@ class TestIsFullyQuoted:
     def test_empty_string(self):
         assert _is_fully_quoted("") is None
 
+    def test_closing_quote_artifact_period(self):
+        """Sentence starting with '. narrator…' is NOT a quoted block — it's a close-quote
+        artifact produced when sentencex splits on '!' inside a quoted sentence."""
+        assert _is_fully_quoted('". Он говорит Сэмюэлу Адамсу.') is None
+
+    def test_closing_quote_artifact_space(self):
+        """Sentence starting with '" narrator…' (space after quote) is NOT a quoted block."""
+        assert _is_fully_quoted('" И вот что он написал.') is None
+
+    def test_closing_quote_artifact_comma(self):
+        assert _is_fully_quoted('", сказал он.') is None
+
 
 # ---------------------------------------------------------------------------
 # split_sentences_with_voices — the Paine quote from the user's example
@@ -164,12 +176,17 @@ class TestSplitIntoSentencesChunkEof:
 
 class TestFindQuotedSpan:
     def test_span_found_across_two_sentences(self):
-        """Opening quote in s[0], closing quote in s[1] — span is [0, 2)."""
+        """Opening quote in s[0], closing quote in s[1] — span is [0, 2), no split needed."""
         sentences = [
             "\u201cНе прошло и шести часов, появилась,",
             "как около трёх часов утра явилась стража\u201d.",
         ]
-        assert _find_quoted_span(sentences, 0) == 2
+        result = _find_quoted_span(sentences, 0)
+        assert result is not None
+        span_end, voiced_last, unvoiced_rest = result
+        assert span_end == 2
+        assert voiced_last is None
+        assert unvoiced_rest is None
 
     def test_no_span_when_already_fully_quoted(self):
         """Sentence already contains close quote → _is_fully_quoted handles it, not this."""
@@ -188,21 +205,45 @@ class TestFindQuotedSpan:
         assert _find_quoted_span(sentences, 0) is None
 
     def test_span_of_three_sentences(self):
-        """Opening in s[0], closing in s[2] — span is [0, 3)."""
+        """Opening in s[0], closing in s[2] — span is [0, 3), no split needed."""
         sentences = [
             "\u201cПервая часть,",
             "вторая часть,",
             "третья часть\u201d.",
         ]
-        assert _find_quoted_span(sentences, 0) == 3
+        result = _find_quoted_span(sentences, 0)
+        assert result is not None
+        span_end, voiced_last, unvoiced_rest = result
+        assert span_end == 3
+        assert voiced_last is None
+        assert unvoiced_rest is None
 
-    def test_no_span_when_close_followed_by_text(self):
-        """Close char followed by non-punctuation text — not a clean close → None."""
+    def test_close_mid_sentence_splits_into_voiced_and_unvoiced(self):
+        """If close quote is mid-sentence, the sentence is split:
+        the voiced fragment ends at the close quote (+punct), the rest is unvoiced."""
         sentences = [
             "\u201cНачало цитаты,",
             "\u201d и продолжение нарратора.",
         ]
-        assert _find_quoted_span(sentences, 0) is None
+        result = _find_quoted_span(sentences, 0)
+        assert result is not None
+        span_end, voiced_last, unvoiced_rest = result
+        assert span_end == 2
+        assert voiced_last == "\u201d"
+        assert unvoiced_rest == "и продолжение нарратора."
+
+    def test_close_mid_sentence_absorbs_trailing_period(self):
+        """Close quote followed by period mid-sentence: period is absorbed into voiced part."""
+        sentences = [
+            "\u201cНачало цитаты,",
+            'церкви\u201d. Плут, переписывавший это.',
+        ]
+        result = _find_quoted_span(sentences, 0)
+        assert result is not None
+        span_end, voiced_last, unvoiced_rest = result
+        assert span_end == 2
+        assert voiced_last == "церкви\u201d."
+        assert unvoiced_rest == "Плут, переписывавший это."
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +267,24 @@ PAINE_PARAGRAPH_CHUNK_EOF = (
     "что заканчивал первую часть ближе к концу тысяча семьсот девяносто третьего года. "
     + PAINE_QUOTE_CHUNK_EOF
     + " Это произошло утром двадцать восьмого декабря."
+)
+
+# Paragraph where the closing quote is followed on the SAME sentence by narrator text
+# (sentencex didn't split at '". '), plus another [chunk_eof] further in the narrator part.
+# Quote chars: straight " (U+0022, open == close) — common in ebook OCR output.
+PAINE_PARAGRAPH_MIXED = (
+    'Редакторы были изрядно сбиты с толку и по-разному изменяли следующее предложение. '
+    '"Нетерпи\u0301мый дух религиозного преследования перенёсся в политику; '
+    'трибуналы, называемые революционными,'
+    + CHUNK_EOF_TAG
+    + ' заняли место инквизиции. '
+    'А гильотина государства превзошла огонь и хворост церкви". '
+    'Плут, переписывавший это, мало знал о том, '
+    'с какой тщательностью Пэйн взвешивал слова, '
+    'и что он никогда не назвал бы преследование "религиозным",'
+    + CHUNK_EOF_TAG
+    + ' не связал бы гильотину с "государством" и не признал бы, '
+    'что при всех её ужасах она превзошла историю огня и костра.'
 )
 
 
@@ -266,6 +325,87 @@ class TestChunkEofInsideQuotedBlock:
         assert all(v is None for v in voices), (
             f"Expected all None voices without voice2, got: {voices}"
         )
+
+    def test_mixed_narrator_after_close_quote_is_not_voice2(self):
+        """Regression: narrator text after the closing quote must NOT get voice2.
+
+        Pattern:  «quote[chunk_eof] continues». Narrator text after. «more quote»,[chunk_eof] rest.
+        The sentence «...церкви». was not split by sentencex, so narrator text was
+        incorrectly assigned voice2 when rfind() found a later quote pair.
+        """
+        pairs = split_sentences_with_voices(PAINE_PARAGRAPH_MIXED, "ru", voice2="v2")
+        # 'Плут, переписывавший' must appear in a voice=None chunk, not voice2
+        plut_pairs = [(t, v) for t, v in pairs if "Плут" in t]
+        assert plut_pairs, "Expected a chunk containing 'Плут' in the output"
+        for text, voice in plut_pairs:
+            assert voice is None, (
+                f"'Плут…' chunk must have voice=None (narrator), got voice={voice!r}. "
+                f"Chunk text: {text!r}"
+            )
+
+    def test_mixed_narrator_voiced_quote_chunks_are_voice2(self):
+        """The actual quote parts in the mixed scenario still get voice2."""
+        pairs = split_sentences_with_voices(PAINE_PARAGRAPH_MIXED, "ru", voice2="v2")
+        voice2_pairs = [(t, v) for t, v in pairs if v == "v2"]
+        assert len(voice2_pairs) >= 2, (
+            f"Expected ≥2 voice2 chunks for quoted speech, got: {voice2_pairs}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Regression: sentencex splits "…не более!" into "…не более!" + '" Он говорит…'
+# The leading close-quote artifact sentence must NOT trigger voice2.
+# ---------------------------------------------------------------------------
+
+# Text that reproduces the exact bug: inline quotes with [chunk_eof] inside,
+# sentencex splits on "!", leaving '". Он говорит…' as a sentence starting with ".
+# Uses plain ASCII double quotes (common in OCR/ebook text).
+PAINE_INLINE_QUOTES_TEXT = (
+    'Он утверждает, что он "увидел чрезвычайную вероятность того'
+    + CHUNK_EOF_TAG
+    + ' что за революцией в религии" и что'
+    ' "человек вернётся к вере в одного Бога, и не более!".'
+    ' Он говорит Сэмюэлу Адамсу, что давно намеревался опубликовать свои мысли о религии.'
+    ' Подобно квакерам, Пэйн употреблял "слово Божие"'
+    + CHUNK_EOF_TAG
+    + ' по отношению ко всему в Библии.'
+)
+
+
+class TestCloseQuoteArtifact:
+    """Sentencex sometimes splits 'text!". Next sentence' into:
+      - 'text!'
+      - '". Next sentence…  "another quote"'
+    The second sentence starts with '" which _is_fully_quoted / _find_quoted_span
+    must NOT mistake for an opening quote block."""
+
+    def test_narrator_after_exclamation_quote_gets_no_voice2(self):
+        """'Он говорит Сэмюэлу Адамсу…' must NOT be voice2."""
+        pairs = split_sentences_with_voices(PAINE_INLINE_QUOTES_TEXT, "ru", voice2="v2")
+        problem_pairs = [
+            (t, v)
+            for t, v in pairs
+            if v == "v2" and (
+                "\u041e\u043d \u0433\u043e\u0432\u043e\u0440\u0438\u0442" in t  # "Он говорит"
+                or "\u041f\u043e\u0434\u043e\u0431\u043d\u043e" in t  # "Подобно"
+            )
+        ]
+        assert not problem_pairs, (
+            "Narrator sentences incorrectly assigned voice2:\n"
+            + "\n".join(f"  {t!r}" for t, _ in problem_pairs)
+        )
+
+    def test_close_quote_artifact_sentence_is_not_fully_quoted(self):
+        """A sentence that starts with '\".' or '\". ' is a close-quote leftover — not a block."""
+        assert _is_fully_quoted('". Он говорит Сэмюэлу Адамсу. Подобно квакерам.') is None
+
+    def test_close_quote_artifact_not_a_span_opener(self):
+        """_find_quoted_span must also reject a sentence starting with '\".'."""
+        sentences = [
+            '". Он говорит Сэмюэлу Адамсу.',
+            'Подобно квакерам, Пэйн употреблял "слово Божие".',
+        ]
+        assert _find_quoted_span(sentences, 0) is None
 
 
 if __name__ == "__main__":
