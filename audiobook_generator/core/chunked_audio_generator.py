@@ -269,12 +269,29 @@ def split_sentences_with_voices(
     return result
 
 
+def _pcm32_to_int16(data: bytes) -> bytes:
+    """Convert 32-bit signed PCM bytes (little-endian) to 16-bit signed PCM.
+
+    PCM-32 from some TTS servers stores full-range int32 values — right-shift
+    by 16 gives the correct int16 equivalent.
+    """
+    import struct as _struct
+    import array as _array
+    n = len(data) // 4
+    int32_vals = _struct.unpack_from(f'<{n}i', data)
+    return _array.array('h', (v >> 16 for v in int32_vals)).tobytes()
+
+
 def _read_wav_frames(path: str) -> Tuple[int, int, int, bytes]:
     """Return ``(nchannels, sampwidth, framerate, frames_bytes)``.
 
-    Supports both standard PCM (format 1) and IEEE float-32 (format 3) WAV
-    files.  Float samples are converted to 16-bit signed integers so the rest
-    of the pipeline always works with regular PCM data.
+    Normalises **all** WAV formats to 16-bit signed PCM so that
+    ``_merge_wav_files`` always writes a uniform int16 output regardless of
+    whether the TTS server produced PCM-16, PCM-32, or IEEE float-32:
+
+    * PCM-16  (format 1, sampwidth=2) → returned as-is.
+    * PCM-32  (format 1, sampwidth=4) → right-shifted to int16.
+    * Float-32 (format 3)             → converted to int16 via float→int clamp.
 
     Raises ``wave.Error`` for truly unreadable or malformed files.
     """
@@ -286,7 +303,15 @@ def _read_wav_frames(path: str) -> Tuple[int, int, int, bytes]:
     try:
         with _wave.open(path, 'rb') as w:
             p = w.getparams()
-            return p.nchannels, p.sampwidth, p.framerate, w.readframes(p.nframes)
+            frames = w.readframes(p.nframes)
+            if p.sampwidth == 2:
+                # Already int16 — return as-is.
+                return p.nchannels, 2, p.framerate, frames
+            if p.sampwidth == 4:
+                # PCM-32: right-shift to int16.
+                return p.nchannels, 2, p.framerate, _pcm32_to_int16(frames)
+            # Other widths (8-bit, 24-bit): return raw and let caller deal with it.
+            return p.nchannels, p.sampwidth, p.framerate, frames
     except _wave.Error as exc:
         if 'unknown format: 3' not in str(exc):
             raise

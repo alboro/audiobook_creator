@@ -20,6 +20,7 @@ from audiobook_generator.core.audiobook_generator import AudiobookGenerator
 from audiobook_generator.core.chunked_audio_generator import (
     _read_wav_frames,
     _merge_wav_files,
+    _pcm32_to_int16,
 )
 
 
@@ -58,6 +59,23 @@ def _pcm16_wav_bytes(samples: list[int], nchannels: int = 1, framerate: int = 22
     return buf.getvalue()
 
 
+def _pcm32_wav_bytes(samples: list[int], nchannels: int = 1, framerate: int = 22050) -> bytes:
+    """Create a valid 32-bit PCM WAV file in memory and return its bytes.
+
+    Each sample value should be in the int32 range.  For audio at full scale
+    the range is [-2^31, 2^31-1].  To avoid manual scaling, callers can pass
+    int16-range values shifted left by 16 bits.
+    """
+    data = struct.pack(f'<{len(samples)}i', *samples)
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as w:
+        w.setnchannels(nchannels)
+        w.setsampwidth(4)
+        w.setframerate(framerate)
+        w.writeframes(data)
+    return buf.getvalue()
+
+
 def _float32_wav_bytes(samples: list[float], nchannels: int = 1, framerate: int = 22050) -> bytes:
     """Create an IEEE float-32 WAV file in memory and return its bytes."""
     n = len(samples)
@@ -87,6 +105,18 @@ def _write_pcm16_chunk(chunks_dir: Path, chapter_key: str, sentence: str,
     d.mkdir(parents=True, exist_ok=True)
     p = d / f"{_shash(sentence)}.wav"
     p.write_bytes(_pcm16_wav_bytes(samples or [1000, -1000], framerate=framerate))
+    return p
+
+
+def _write_pcm32_chunk(chunks_dir: Path, chapter_key: str, sentence: str,
+                       samples_int32: list[int] | None = None, framerate: int = 22050) -> Path:
+    """Write a 32-bit PCM WAV chunk for *sentence* under *chapter_key*."""
+    d = chunks_dir / chapter_key
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{_shash(sentence)}.wav"
+    # Default: int16 values shifted left by 16 to fill the int32 range
+    default = [1000 << 16, -1000 << 16]
+    p.write_bytes(_pcm32_wav_bytes(samples_int32 or default, framerate=framerate))
     return p
 
 
@@ -260,6 +290,101 @@ class TestMergeWavFiles:
         samples = struct.unpack(f'<{n}h', frames)
         assert any(s > 0 for s in samples)
         assert any(s < 0 for s in samples)
+
+
+# ===========================================================================
+# Tests for PCM-32 handling (the "children's voice" bug)
+# ===========================================================================
+
+class TestPcm32Normalization:
+    """Regression tests for 32-bit PCM WAV files being normalized to int16.
+
+    The TTS server sometimes emits a leading chunk as PCM-32 (format 1,
+    sampwidth=4) and subsequent chunks as float-32 (format 3).  Without
+    normalization the output WAV gets sampwidth=4 from the first chunk while
+    float-converted chunks contribute int16 data — causing playback at 2×
+    speed (children's voice effect).
+    """
+
+    def test_pcm32_to_int16_round_trip(self):
+        """PCM-32 values shifted by 16 convert back to the expected int16."""
+        assert _pcm32_to_int16(struct.pack('<i', 1000 << 16)) == struct.pack('<h', 1000)
+        assert _pcm32_to_int16(struct.pack('<i', -1000 << 16)) == struct.pack('<h', -1000)
+        # Full positive and negative
+        assert _pcm32_to_int16(struct.pack('<i', 0x7FFF0000)) == struct.pack('<h', 0x7FFF)
+        assert _pcm32_to_int16(struct.pack('<i', -0x80000000)) == struct.pack('<h', -0x8000)
+
+    def test_read_wav_frames_normalizes_pcm32_to_int16(self, tmp_path):
+        """_read_wav_frames returns sampwidth=2 for a PCM-32 input file."""
+        # Samples in int32 range (shifted int16 values)
+        samples_int32 = [1000 << 16, -1000 << 16, 2000 << 16, -2000 << 16]
+        f = tmp_path / "pcm32.wav"
+        f.write_bytes(_pcm32_wav_bytes(samples_int32, framerate=24000))
+
+        nch, sw, fr, frames = _read_wav_frames(str(f))
+        assert sw == 2, "PCM-32 should be returned as int16 (sampwidth=2)"
+        assert fr == 24000
+        samples_out = struct.unpack(f'<{len(frames)//2}h', frames)
+        assert samples_out[0] == 1000
+        assert samples_out[1] == -1000
+        assert samples_out[2] == 2000
+        assert samples_out[3] == -2000
+
+    def test_merge_pcm32_then_float32_same_speed(self, tmp_path):
+        """When first chunk is PCM-32 and rest are float-32, output is int16
+        and both chunks play at the same speed without pitch shift.
+
+        This is the direct regression test for the 'children's voice' bug:
+        before the fix, the output WAV had sampwidth=4 (from PCM-32 first
+        chunk) but the float-converted data was int16, causing 2× speed
+        playback for all chunks after the first.
+        """
+        # Chunk 1: PCM-32         (format 1, sampwidth=4)  — positive values
+        c1 = tmp_path / "c1.wav"
+        c1.write_bytes(_pcm32_wav_bytes([1000 << 16, 1000 << 16, 1000 << 16, 1000 << 16],
+                                        framerate=24000))
+
+        # Chunk 2: float-32       (format 3)               — negative values
+        c2 = tmp_path / "c2.wav"
+        c2.write_bytes(_float32_wav_bytes([-0.03, -0.03, -0.03, -0.03], framerate=24000))
+
+        out = tmp_path / "out.wav"
+        _merge_wav_files([str(c1), str(c2)], str(out))
+
+        with wave.open(str(out), 'rb') as w:
+            assert w.getsampwidth() == 2, (
+                "Output should be int16 even when first chunk is PCM-32"
+            )
+            assert w.getframerate() == 24000
+            total_frames = w.getnframes()
+            raw = w.readframes(total_frames)
+
+        # Total samples = 4 from c1 + 4 from c2 = 8
+        assert total_frames == 8, (
+            f"Expected 8 frames (4 + 4), got {total_frames}. "
+            "If 4, the second chunk was interpreted at wrong sampwidth."
+        )
+        samples = struct.unpack('<8h', raw)
+        # First 4 samples should be positive (from PCM-32 chunk)
+        assert all(s > 0 for s in samples[:4]), f"First 4 samples should be positive: {samples[:4]}"
+        # Last 4 samples should be negative (from float-32 chunk)
+        assert all(s < 0 for s in samples[4:]), f"Last 4 samples should be negative: {samples[4:]}"
+
+    def test_merge_pcm32_only_gives_int16_output(self, tmp_path):
+        """Merging only PCM-32 chunks still produces int16 output."""
+        c1 = tmp_path / "c1.wav"
+        c2 = tmp_path / "c2.wav"
+        c1.write_bytes(_pcm32_wav_bytes([500 << 16, 500 << 16], framerate=22050))
+        c2.write_bytes(_pcm32_wav_bytes([-500 << 16, -500 << 16], framerate=22050))
+
+        out = tmp_path / "out.wav"
+        _merge_wav_files([str(c1), str(c2)], str(out))
+
+        with wave.open(str(out), 'rb') as w:
+            assert w.getsampwidth() == 2
+            all_samples = struct.unpack('<4h', w.readframes(4))
+        assert all_samples[:2] == (500, 500)
+        assert all_samples[2:] == (-500, -500)
 
 
 # ===========================================================================
