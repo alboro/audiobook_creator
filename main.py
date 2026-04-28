@@ -847,15 +847,12 @@ def _run_audio_check(config):
 
 
 def _run_audio_worker(config):
-    """Run audio_worker mode: synthesise missing chunks in an infinite loop.
-
-    Each pass is identical to --mode audio_chunks (skips already-present files).
-    Sleeps *audio_worker_interval* seconds between passes.
-    Stops cleanly on Ctrl+C — any chunk currently being synthesised finishes
-    before the process exits.
-    """
+    """Run audio_worker mode: synthesise missing chunks in an infinite loop."""
     import copy
+    import logging
     import time
+
+    _log = logging.getLogger(__name__)
 
     poll_interval = int(getattr(config, "audio_worker_interval", None) or 30)
 
@@ -867,7 +864,7 @@ def _run_audio_worker(config):
     try:
         while True:
             pass_num += 1
-            logger.info("=== audio_worker: pass %d ===", pass_num)
+            _log.info("=== audio_worker: pass %d ===", pass_num)
 
             synth_cfg = copy.copy(config)
             synth_cfg.mode = "audio_chunks"
@@ -881,9 +878,9 @@ def _run_audio_worker(config):
             except KeyboardInterrupt:
                 raise  # propagate to outer handler
             except Exception as exc:
-                logger.error("audio_worker: pass %d error: %s", pass_num, exc)
+                _log.error("audio_worker: pass %d error: %s", pass_num, exc)
 
-            logger.info(
+            _log.info(
                 "=== audio_worker: pass %d done — sleeping %ds ===",
                 pass_num, poll_interval,
             )
