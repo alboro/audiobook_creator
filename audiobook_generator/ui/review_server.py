@@ -26,12 +26,12 @@ from pydantic import BaseModel
 
 from audiobook_generator.config.ini_config_manager import load_merged_ini
 from audiobook_generator.core.audio_chunk_store import AudioChunkStore
+from audiobook_generator.core.chunked_audio_generator import split_sentences_with_voices
 from audiobook_generator.ui.review_text_ops import apply_review_edit
 from audiobook_generator.utils.existing_chapters_loader import (
     ExistingChapter,
     find_latest_run_folder,
     load_chapters_from_run_folder,
-    split_text_into_chunks,
 )
 from audiobook_generator.utils.sentence_hash import sentence_hash as _sentence_hash
 
@@ -118,15 +118,32 @@ async def get_chapters(dir: str):
     return result
 
 
+def _config_voice_name2() -> Optional[str]:
+    """Return voice_name2 from server config or INI, or None if not set."""
+    cfg = getattr(app.state, "review_config", None)
+    v2 = getattr(cfg, "voice_name2", None)
+    if v2:
+        return v2
+    try:
+        ini = load_merged_ini()
+        raw = ini.get("voice_name2")
+        if raw:
+            return raw
+    except Exception:
+        pass
+    return None
+
+
 @app.get("/api/chunks")
 async def get_chunks(dir: str, chapter_key: str, text_path: str):
     """Return chunks for a chapter with their audio status."""
     if not Path(text_path).exists():
         raise HTTPException(404, f"Text file not found: {text_path}")
     text = Path(text_path).read_text(encoding="utf-8")
-    chunks = split_text_into_chunks(text, "ru")
+    voice2 = _config_voice_name2()
+    pairs = split_sentences_with_voices(text, "ru", voice2=voice2)
     result = []
-    for i, chunk in enumerate(chunks):
+    for i, (chunk, voice) in enumerate(pairs):
         h = _sentence_hash(chunk)
         audio_path = _find_chunk_path(dir, chapter_key, h)
         result.append({
@@ -134,6 +151,8 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
             "text": chunk,
             "hash": h,
             "has_audio": audio_path is not None,
+            # voice is None for default voice; non-None means voice2 is used for this chunk
+            "voice": voice,
         })
     return result
 

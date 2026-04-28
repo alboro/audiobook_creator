@@ -7,6 +7,7 @@ import pytest
 
 from audiobook_generator.core.chunked_audio_generator import (
     _is_fully_quoted,
+    _find_quoted_span,
     split_sentences_with_voices,
     split_into_sentences,
 )
@@ -155,6 +156,116 @@ class TestSplitIntoSentencesChunkEof:
     def test_chunk_eof_is_boundary_and_removed(self):
         sentences = split_into_sentences(f"Первая часть{CHUNK_EOF_TAG} Вторая часть.", "ru")
         assert sentences == ["Первая часть", "Вторая часть."]
+
+
+# ---------------------------------------------------------------------------
+# _find_quoted_span — cross-boundary quoted block detection
+# ---------------------------------------------------------------------------
+
+class TestFindQuotedSpan:
+    def test_span_found_across_two_sentences(self):
+        """Opening quote in s[0], closing quote in s[1] — span is [0, 2)."""
+        sentences = [
+            "\u201cНе прошло и шести часов, появилась,",
+            "как около трёх часов утра явилась стража\u201d.",
+        ]
+        assert _find_quoted_span(sentences, 0) == 2
+
+    def test_no_span_when_already_fully_quoted(self):
+        """Sentence already contains close quote → _is_fully_quoted handles it, not this."""
+        sentences = ["\u201cПолностью закрытая цитата\u201d.", "Следующее."]
+        # close char IS present in s[0][1:] → returns None
+        assert _find_quoted_span(sentences, 0) is None
+
+    def test_no_span_when_no_close_quote_anywhere(self):
+        """No closing quote found → returns None."""
+        sentences = ["\u201cОткрытая цитата без закрытия", "Следующее предложение."]
+        assert _find_quoted_span(sentences, 0) is None
+
+    def test_no_span_for_plain_sentence(self):
+        """Sentence without opening quote → returns None."""
+        sentences = ["Обычное предложение.", "Другое предложение."]
+        assert _find_quoted_span(sentences, 0) is None
+
+    def test_span_of_three_sentences(self):
+        """Opening in s[0], closing in s[2] — span is [0, 3)."""
+        sentences = [
+            "\u201cПервая часть,",
+            "вторая часть,",
+            "третья часть\u201d.",
+        ]
+        assert _find_quoted_span(sentences, 0) == 3
+
+    def test_no_span_when_close_followed_by_text(self):
+        """Close char followed by non-punctuation text — not a clean close → None."""
+        sentences = [
+            "\u201cНачало цитаты,",
+            "\u201d и продолжение нарратора.",
+        ]
+        assert _find_quoted_span(sentences, 0) is None
+
+
+# ---------------------------------------------------------------------------
+# Regression: [chunk_eof] inside a quoted block — voice2 must still be assigned
+# ---------------------------------------------------------------------------
+
+# Exact text from the user bug report (typographic " " quotes, chunk_eof inside)
+PAINE_QUOTE_CHUNK_EOF = (
+    "\u201c"
+    "Не прошло и шести часов с тех пор, как я её закончил, "
+    "в том виде, в каком она затем появилась,"
+    + CHUNK_EOF_TAG
+    + " как около трёх часов утра явилась стража с приказом взять меня под арест, "
+    "подписанным двумя комитетами общественного спасения и общей безопасности"
+    "\u201d."
+)
+
+# Full paragraph context — mirrors the real-world usage
+PAINE_PARAGRAPH_CHUNK_EOF = (
+    "В предисловии Пэйна ко второй части «Века разума» он пишет о себе, "
+    "что заканчивал первую часть ближе к концу тысяча семьсот девяносто третьего года. "
+    + PAINE_QUOTE_CHUNK_EOF
+    + " Это произошло утром двадцать восьмого декабря."
+)
+
+
+class TestChunkEofInsideQuotedBlock:
+    def test_chunk_eof_quoted_block_produces_chunks(self):
+        """[chunk_eof] inside a quoted block: split_sentences_with_voices must return ≥2 pairs."""
+        pairs = split_sentences_with_voices(PAINE_QUOTE_CHUNK_EOF, "ru", voice2="v2")
+        assert len(pairs) >= 2, (
+            f"Expected ≥2 pairs from quoted block split by [chunk_eof], got {len(pairs)}: {pairs}"
+        )
+
+    def test_chunk_eof_quoted_block_all_voice2(self):
+        """All sentence pairs produced from a chunk_eof-split quoted block must carry voice2."""
+        pairs = split_sentences_with_voices(PAINE_QUOTE_CHUNK_EOF, "ru", voice2="v2")
+        voices = [v for _, v in pairs]
+        assert all(v == "v2" for v in voices), (
+            f"Expected all voice2='v2', got voices={voices}"
+        )
+
+    def test_paragraph_context_quoted_parts_are_voice2(self):
+        """In full paragraph context the quoted parts get voice2, narrator parts do not."""
+        pairs = split_sentences_with_voices(PAINE_PARAGRAPH_CHUNK_EOF, "ru", voice2="v2")
+        # At least two pairs must have voice2 (the two halves of the split quote)
+        voice2_pairs = [(t, v) for t, v in pairs if v == "v2"]
+        assert len(voice2_pairs) >= 2, (
+            f"Expected ≥2 voice2 pairs in paragraph, got {voice2_pairs}"
+        )
+        # Narrator sentences (before/after the quote) must have no voice override
+        none_pairs = [(t, v) for t, v in pairs if v is None]
+        assert len(none_pairs) >= 1, (
+            f"Expected ≥1 narrator (voice=None) pair in paragraph, got none.\nAll pairs: {pairs}"
+        )
+
+    def test_no_voice2_no_change(self):
+        """Without voice2, the [chunk_eof] inside quote just produces plain splits, no voice."""
+        pairs = split_sentences_with_voices(PAINE_QUOTE_CHUNK_EOF, "ru", voice2=None)
+        voices = [v for _, v in pairs]
+        assert all(v is None for v in voices), (
+            f"Expected all None voices without voice2, got: {voices}"
+        )
 
 
 if __name__ == "__main__":

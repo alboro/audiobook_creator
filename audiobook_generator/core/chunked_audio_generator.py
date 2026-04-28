@@ -92,6 +92,40 @@ def _is_fully_quoted(text: str) -> Optional[Tuple[str, str]]:
     return (open_char, close_char)
 
 
+def _find_quoted_span(sentences: List[str], start: int) -> Optional[int]:
+    """If ``sentences[start]`` opens a quoted block that is closed in a later sentence,
+    return the exclusive end index of the span, otherwise return None.
+
+    This handles the case where a ``[chunk_eof]`` tag splits a quoted block so that the
+    opening and closing quotes land in different sentence items.  ``_is_fully_quoted``
+    cannot detect such spans because it only inspects a single sentence.
+
+    The function considers ``sentences[start]`` as an unclosed opener only when the
+    opening quote char is found at the start of the stripped text **and** no matching
+    closing quote follows within the same sentence.  It then scans forward until it
+    finds a sentence whose stripped text contains the closing quote, after which only
+    punctuation / whitespace appear.
+    """
+    t = sentences[start].strip()
+    if not t or t[0] not in _OPEN_QUOTES:
+        return None
+    open_char = t[0]
+    close_char = _CLOSE_FOR_OPEN[open_char]
+    # If the closing quote is already present, _is_fully_quoted handles this sentence.
+    if close_char in t[1:]:
+        return None
+    for end in range(start + 1, len(sentences)):
+        sent = sentences[end].strip()
+        if close_char in sent:
+            idx = sent.rfind(close_char)
+            after = sent[idx + 1:].strip()
+            if not after or re.fullmatch(r'[\s.,!?;:\-…]+', after):
+                return end + 1  # exclusive end of the span
+            # Closing char found but followed by non-punctuation — not a clean close.
+            return None
+    return None
+
+
 def split_sentences_with_voices(
     text: str,
     language: str = "ru",
@@ -102,11 +136,18 @@ def split_sentences_with_voices(
     When *voice2* is set, sentences that form a fully-quoted block are
     further split internally and tagged with *voice2*.  If *voice2* is None,
     all sentences use the default voice (None).
+
+    Also handles quoted blocks that were split across a ``[chunk_eof]`` boundary:
+    if ``sentences[i]`` starts with an opening quote but has no matching closing
+    quote, the function looks ahead to find the sentence that closes the block and
+    assigns *voice2* to all sentences in the span.
     """
     sentences = split_into_sentences(text, language)
     result: List[Tuple[str, Optional[str]]] = []
 
-    for sentence in sentences:
+    i = 0
+    while i < len(sentences):
+        sentence = sentences[i]
         quote_pair = _is_fully_quoted(sentence) if voice2 else None
         if quote_pair:
             open_char, close_char = quote_pair
@@ -128,11 +169,27 @@ def split_sentences_with_voices(
                 )
                 for sub in inner_sentences:
                     result.append((sub, voice2))
+                i += 1
                 continue
             # Only one inner sentence — keep original sentence text with voice2
             result.append((sentence, voice2))
+        elif voice2:
+            # Detect a quoted block split by [chunk_eof]: the opening and closing quotes
+            # appear in different sentence items after boundary splitting.
+            span_end = _find_quoted_span(sentences, i)
+            if span_end is not None:
+                logger.debug(
+                    "Cross-boundary quoted span sentences %d..%d assigned voice2=%s: %s…",
+                    i, span_end - 1, voice2, sentence[:60],
+                )
+                for k in range(i, span_end):
+                    result.append((sentences[k], voice2))
+                i = span_end
+                continue
+            result.append((sentence, None))
         else:
             result.append((sentence, None))
+        i += 1
 
     return result
 
