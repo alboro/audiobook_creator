@@ -269,6 +269,62 @@ def split_sentences_with_voices(
     return result
 
 
+def _read_wav_frames(path: str) -> Tuple[int, int, int, bytes]:
+    """Return ``(nchannels, sampwidth, framerate, frames_bytes)``.
+
+    Supports both standard PCM (format 1) and IEEE float-32 (format 3) WAV
+    files.  Float samples are converted to 16-bit signed integers so the rest
+    of the pipeline always works with regular PCM data.
+
+    Raises ``wave.Error`` for truly unreadable or malformed files.
+    """
+    import wave as _wave
+    import struct as _struct
+    import array as _array
+
+    # ── Fast path: standard PCM WAV ──────────────────────────────────────────
+    try:
+        with _wave.open(path, 'rb') as w:
+            p = w.getparams()
+            return p.nchannels, p.sampwidth, p.framerate, w.readframes(p.nframes)
+    except _wave.Error as exc:
+        if 'unknown format: 3' not in str(exc):
+            raise
+
+    # ── Slow path: IEEE float-32 WAV — parse RIFF manually ───────────────────
+    with open(path, 'rb') as f:
+        raw = f.read()
+
+    if raw[:4] != b'RIFF' or raw[8:12] != b'WAVE':
+        raise _wave.Error(f"not a valid WAV file: {path}")
+
+    nchannels: Optional[int] = None
+    sample_rate: Optional[int] = None
+    audio_data: bytes = b''
+
+    pos = 12
+    while pos + 8 <= len(raw):
+        cid = raw[pos:pos + 4]
+        csz = _struct.unpack_from('<I', raw, pos + 4)[0]
+        if cid == b'fmt ':
+            nchannels = _struct.unpack_from('<H', raw, pos + 8 + 2)[0]
+            sample_rate = _struct.unpack_from('<I', raw, pos + 8 + 4)[0]
+        elif cid == b'data':
+            audio_data = raw[pos + 8: pos + 8 + csz]
+        pos += 8 + csz + (csz & 1)  # RIFF pads odd-sized chunks
+
+    if not nchannels or not sample_rate:
+        raise _wave.Error(f"malformed IEEE float WAV (missing fmt/data): {path}")
+
+    # Convert float32 LE samples to int16 PCM
+    float_count = len(audio_data) // 4
+    floats = _struct.unpack_from(f'<{float_count}f', audio_data)
+    pcm = _array.array('h', (
+        max(-32768, min(32767, int(f * 32767.0))) for f in floats
+    ))
+    return nchannels, 2, sample_rate, pcm.tobytes()
+
+
 def _apply_boundary_fades(
     data: bytes,
     sampwidth: int,
@@ -340,6 +396,9 @@ def _apply_boundary_fades(
 def _merge_wav_files(chunk_paths: List[str], output_path: str, smooth_join_ms: int = 0) -> None:
     """Fast WAV concatenation using Python's stdlib ``wave`` module (O(n)).
 
+    Supports both standard PCM and IEEE float-32 WAV chunk files.  Float
+    samples are converted to 16-bit PCM on the fly via :func:`_read_wav_frames`.
+
     Optionally applies a short linear fade-out at the tail of each chunk and
     a fade-in at the head of the next chunk (*smooth_join_ms* > 0) to
     eliminate audible clicks / crackling at boundaries.
@@ -348,21 +407,30 @@ def _merge_wav_files(chunk_paths: List[str], output_path: str, smooth_join_ms: i
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    with wave.open(chunk_paths[0], 'rb') as first_w:
-        params = first_w.getparams()
+    # Determine output WAV params from the first readable chunk.
+    out_nchannels = out_sampwidth = out_framerate = None
+    for cp in chunk_paths:
+        try:
+            nc, sw, fr, _ = _read_wav_frames(cp)
+            out_nchannels, out_sampwidth, out_framerate = nc, sw, fr
+            break
+        except Exception:
+            continue
 
-    fade_samples = int(params.framerate * smooth_join_ms / 1000) if smooth_join_ms > 0 else 0
+    if out_nchannels is None:
+        raise wave.Error("No readable WAV chunks found among %d paths" % len(chunk_paths))
+
+    fade_samples = int(out_framerate * smooth_join_ms / 1000) if smooth_join_ms > 0 else 0
     n = len(chunk_paths)
 
     with wave.open(output_path, 'wb') as out_w:
-        out_w.setnchannels(params.nchannels)
-        out_w.setsampwidth(params.sampwidth)
-        out_w.setframerate(params.framerate)
+        out_w.setnchannels(out_nchannels)
+        out_w.setsampwidth(out_sampwidth)
+        out_w.setframerate(out_framerate)
 
         for i, path in enumerate(chunk_paths):
             try:
-                with wave.open(path, 'rb') as w:
-                    data = w.readframes(w.getnframes())
+                _, _, _, data = _read_wav_frames(path)
             except Exception as exc:
                 logger.warning("Skipping unreadable chunk %s: %s", path, exc)
                 continue
@@ -370,8 +438,8 @@ def _merge_wav_files(chunk_paths: List[str], output_path: str, smooth_join_ms: i
             if fade_samples > 0:
                 data = _apply_boundary_fades(
                     data,
-                    params.sampwidth,
-                    params.nchannels,
+                    out_sampwidth,
+                    out_nchannels,
                     fade_samples,
                     fade_in=(i > 0),
                     fade_out=(i < n - 1),
