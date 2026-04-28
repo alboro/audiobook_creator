@@ -29,7 +29,9 @@ Usage (CLI):
 from __future__ import annotations
 
 import logging
+import os
 import re
+import sys
 import unicodedata
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
@@ -149,6 +151,47 @@ def _build_pre_compare_normalizer(language: str = "ru"):
         return None
 
 
+def _iter_windows_cuda_dll_dirs() -> list[Path]:
+    """Return candidate DLL directories that may satisfy faster-whisper on Windows."""
+    if os.name != "nt":
+        return []
+
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _maybe_add(path: Path) -> None:
+        key = str(path).lower()
+        if key in seen or not path.is_dir():
+            return
+        marker_names = ("cublas64_12.dll", "cudart64_12.dll", "cudnn64_9.dll")
+        if not any((path / marker).exists() for marker in marker_names):
+            return
+        seen.add(key)
+        candidates.append(path)
+
+    current_prefix = Path(sys.executable).resolve().parent.parent
+    _maybe_add(current_prefix / "Lib" / "site-packages" / "torch" / "lib")
+    _maybe_add(current_prefix / "Lib" / "site-packages" / "ctranslate2")
+
+    repo_root = Path(__file__).resolve().parents[2]
+    projects_root = repo_root.parent
+    if projects_root.is_dir():
+        for project_dir in projects_root.iterdir():
+            if not project_dir.is_dir():
+                continue
+            _maybe_add(project_dir / ".venv" / "Lib" / "site-packages" / "torch" / "lib")
+            _maybe_add(project_dir / ".venv" / "Lib" / "site-packages" / "ctranslate2")
+            conda_envs = project_dir / ".conda" / "miniforge" / "envs"
+            if conda_envs.is_dir():
+                for env_dir in conda_envs.iterdir():
+                    if not env_dir.is_dir():
+                        continue
+                    _maybe_add(env_dir / "Lib" / "site-packages" / "torch" / "lib")
+                    _maybe_add(env_dir / "Lib" / "site-packages" / "ctranslate2")
+
+    return candidates
+
+
 class AudioChecker:
     """Walk text files to find synthesised chunks and quality-check them."""
 
@@ -169,6 +212,8 @@ class AudioChecker:
         self._device = device
         self._compute_type = compute_type
         self._model = None  # lazy-loaded
+        self._dll_dir_handles = []
+        self._cuda_runtime_prepared = False
         # Pre-compare normalizer: expand abbreviations/numbers before similarity scoring.
         # Built from config language if available, otherwise use default "ru".
         _lang = getattr(config, "language", language) if config else language
@@ -176,8 +221,32 @@ class AudioChecker:
 
     # ------------------------------------------------------------------
 
+    def _prepare_windows_cuda_runtime(self) -> None:
+        if self._cuda_runtime_prepared or os.name != "nt" or str(self._device).lower() != "cuda":
+            return
+        added_dirs: list[str] = []
+        path_entries = os.environ.get("PATH", "").split(os.pathsep)
+        path_entries_lower = {entry.lower() for entry in path_entries if entry}
+
+        for dll_dir in _iter_windows_cuda_dll_dirs():
+            dll_dir_str = str(dll_dir)
+            if hasattr(os, "add_dll_directory"):
+                try:
+                    self._dll_dir_handles.append(os.add_dll_directory(dll_dir_str))
+                except (FileNotFoundError, OSError):
+                    pass
+            if dll_dir_str.lower() not in path_entries_lower:
+                os.environ["PATH"] = dll_dir_str + os.pathsep + os.environ.get("PATH", "")
+                path_entries_lower.add(dll_dir_str.lower())
+            added_dirs.append(dll_dir_str)
+
+        if added_dirs:
+            logger.info("Prepared CUDA DLL paths for audio_check: %s", "; ".join(added_dirs))
+        self._cuda_runtime_prepared = True
+
     def _get_model(self):
         if self._model is None:
+            self._prepare_windows_cuda_runtime()
             from faster_whisper import WhisperModel  # type: ignore[import]
             logger.info(
                 "Loading Whisper model '%s' on %s …",

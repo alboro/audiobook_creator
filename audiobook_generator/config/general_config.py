@@ -163,6 +163,11 @@ class GeneralConfig:
         self.kokoro_base_url = getattr(args, 'kokoro_base_url', None)
         self.kokoro_volume_multiplier = getattr(args, 'kokoro_volume_multiplier', None)
 
+        # Audio check specific arguments
+        self.audio_check_model = getattr(args, 'audio_check_model', None)
+        self.audio_check_threshold = getattr(args, 'audio_check_threshold', None)
+        self.audio_check_device = getattr(args, 'audio_check_device', None)
+
         # Dynamic per-normalizer model overrides: normalize_{step}_model
         # These are set by merge_ini_into_args for any key in INI that matches the pattern.
         for _key, _val in vars(args).items() if hasattr(args, '__dict__') else []:

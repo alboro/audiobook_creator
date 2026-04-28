@@ -62,6 +62,7 @@ def _make_args(**kwargs):
         normalize_tsnorm_min_word_length=None,
         normalize_stress_paradox_words=None, normalize_log_changes=None,
         normalize_prompt_file=None, normalize_pronunciation_exceptions_file=None,
+        audio_check_model=None, audio_check_threshold=None, audio_check_device=None,
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -248,6 +249,22 @@ class TestTtsDefault(unittest.TestCase):
         args = _make_args(tts=None)
         self._apply_defaults(args)
         self.assertEqual(args.tts, "azure")
+
+
+class TestGeneralConfigAudioCheck(unittest.TestCase):
+    def test_audio_check_fields_are_preserved(self):
+        from audiobook_generator.config.general_config import GeneralConfig
+
+        args = _make_args(
+            audio_check_model="small",
+            audio_check_threshold=0.94,
+            audio_check_device="cuda",
+        )
+        config = GeneralConfig(args)
+
+        self.assertEqual(config.audio_check_model, "small")
+        self.assertEqual(config.audio_check_threshold, 0.94)
+        self.assertEqual(config.audio_check_device, "cuda")
 
 
 # ---------------------------------------------------------------------------
