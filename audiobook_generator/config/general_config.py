@@ -59,8 +59,17 @@ class GeneralConfig:
         _smooth_ms = getattr(args, 'tts_chunk_smooth_join_ms', None)
         try:
             self.tts_chunk_smooth_join_ms = int(_smooth_ms) if _smooth_ms is not None else 30
-        except (ValueError, TypeError):
+        except (TypeError, ValueError):
             self.tts_chunk_smooth_join_ms = 30
+        # DC offset removal: subtract per-chunk mean before merging (default: True).
+        _dc = getattr(args, 'tts_chunk_dc_remove', None)
+        self.tts_chunk_dc_remove = str(_dc).lower() != 'false' if _dc is not None else True
+        # Silence gap between chunks at merge time, ms (default: 0 = disabled).
+        _gap = getattr(args, 'tts_chunk_merge_gap_ms', None)
+        try:
+            self.tts_chunk_merge_gap_ms = int(_gap) if _gap is not None else 0
+        except (TypeError, ValueError):
+            self.tts_chunk_merge_gap_ms = 0
         self.openai_api_key = getattr(args, 'openai_api_key', None)
         self.openai_base_url = getattr(args, 'openai_base_url', None)
         self.openai_max_chars = getattr(args, 'openai_max_chars', None)
