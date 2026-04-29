@@ -54,6 +54,25 @@ class AudiobookGenerator:
     def __str__(self) -> str:
         return f"{self.config}"
 
+    def _chunk_merge_options(self) -> tuple[int, int, int]:
+        smooth_join_ms = 0
+        if getattr(self.config, "tts_chunk_smooth_join", True):
+            smooth_join_ms = int(
+                getattr(self.config, "tts_chunk_smooth_join_ms", 30) or 30
+            )
+
+        start_declick_ms = 0
+        start_declick_fade_ms = 0
+        if getattr(self.config, "tts_chunk_declick_start", False):
+            start_declick_ms = int(
+                getattr(self.config, "tts_chunk_declick_start_ms", 10) or 10
+            )
+            start_declick_fade_ms = int(
+                getattr(self.config, "tts_chunk_declick_fade_ms", 6) or 6
+            )
+
+        return smooth_join_ms, start_declick_ms, start_declick_fade_ms
+
     def _chapter_text_path(self, base_dir, idx, title):
         safe_txt_name = make_safe_filename(
             title=title,
@@ -425,7 +444,16 @@ class AudiobookGenerator:
             chapter_file = os.path.join(audio_folder, f"{chapter_key}.wav")  # Assume wav for merged
             try:
                 from audiobook_generator.core.chunked_audio_generator import _merge_audio_files
-                _merge_audio_files(chunk_files, chapter_file)
+                smooth_join_ms, start_declick_ms, start_declick_fade_ms = (
+                    self._chunk_merge_options()
+                )
+                _merge_audio_files(
+                    chunk_files,
+                    chapter_file,
+                    smooth_join_ms,
+                    start_declick_ms,
+                    start_declick_fade_ms,
+                )
                 # Derive title from chapter_key: replace _ with space, strip numbers if any
                 title = chapter_key.replace("_", " ")
                 import re as _re
@@ -569,7 +597,16 @@ class AudiobookGenerator:
                         logger.info("  Deleted old chapter file: %s", old)
 
                 try:
-                    _merge_audio_files(chunk_paths, chapter_out)
+                    smooth_join_ms, start_declick_ms, start_declick_fade_ms = (
+                        self._chunk_merge_options()
+                    )
+                    _merge_audio_files(
+                        chunk_paths,
+                        chapter_out,
+                        smooth_join_ms,
+                        start_declick_ms,
+                        start_declick_fade_ms,
+                    )
                     logger.info(
                         "  Chapter %d '%s': rebuilt from %d chunks → %s",
                         idx, title, len(chunk_paths), chapter_out,

@@ -29,7 +29,11 @@ def _make_args(**kwargs):
     """Minimal argparse-like namespace with all defaults None."""
     defaults = dict(
         input_file=None, output_folder=None, mode=None, tts=None,
-        language=None, voice_name=None, output_format=None, model_name=None,
+        language=None, voice_name=None, voice_name2=None, output_format=None, model_name=None,
+        tts_trailing_strip_chars=None, tts_trim_silence=None, tts_chunk_smooth_join=None,
+        tts_chunk_smooth_join_ms=None, tts_chunk_declick_start=None,
+        tts_chunk_declick_start_ms=None, tts_chunk_declick_fade_ms=None,
+        tts_log_text=None,
         log=None, no_prompt=None, worker_count=None, use_pydub_merge=None,
         package_m4b=None, chunked_audio=None, audio_folder=None,
         m4b_filename=None, m4b_bitrate=None, chapter_titles_file=None, cover_image=None, ffmpeg_path=None,
@@ -117,6 +121,20 @@ audio_folder = smb://DIETPI._smb._tcp.local/aldem/books/example/wav/
             values["audio_folder"],
             "smb://DIETPI._smb._tcp.local/aldem/books/example/wav/",
         )
+
+    def test_reads_chunk_start_declick_settings(self):
+        from audiobook_generator.config.ini_config_manager import load_ini
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = _make_ini(Path(tmp) / "test.ini", """
+[tts]
+tts_chunk_declick_start = true
+tts_chunk_declick_start_ms = 10
+tts_chunk_declick_fade_ms = 6
+""")
+            values = load_ini(ini)
+        self.assertEqual(values["tts_chunk_declick_start"], "true")
+        self.assertEqual(values["tts_chunk_declick_start_ms"], "10")
+        self.assertEqual(values["tts_chunk_declick_fade_ms"], "6")
 
     def test_reads_cover_and_chapter_titles_from_m4b_section(self):
         from audiobook_generator.config.ini_config_manager import load_ini
@@ -489,7 +507,7 @@ class TestAudioFolderOverride(unittest.TestCase):
         )
         self.assertEqual(
             mapped,
-            "/Volumes/aldem/books/ebook_creator/actual_version/MyBook/wav",
+            os.path.normpath("/Volumes/aldem/books/ebook_creator/actual_version/MyBook/wav"),
         )
 
     def test_detect_audio_folder_resolves_mounted_smb_override(self):

@@ -282,6 +282,25 @@ def handle_args():
         default=None,
         help="Characters to strip from the end of each TTS text chunk (default: '.', set to '' to disable).",
     )
+    parser.add_argument(
+        "--tts_chunk_declick_start",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Remove a short detected click/burst from the beginning of each chunk before merging.",
+    )
+    parser.add_argument(
+        "--tts_chunk_declick_start_ms",
+        type=int,
+        default=None,
+        help="Milliseconds to remove from the beginning of a chunk when a start click is detected.",
+    )
+    parser.add_argument(
+        "--tts_chunk_declick_fade_ms",
+        type=int,
+        default=None,
+        help="Fade-in length after start de-click trimming.",
+    )
 
     openai_tts_group = parser.add_argument_group(title="openai specific")
     openai_tts_group.add_argument(

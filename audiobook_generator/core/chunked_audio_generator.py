@@ -43,6 +43,7 @@ MIN_SENTENCE_CHARS = 3
 SILENCE_TAIL_MS = 200
 # Silence threshold in dBFS below which a segment is considered silent.
 SILENCE_THRESH_DBFS = -45
+START_CLICK_PEAK_THRESHOLD = 0.03
 
 # Opening/closing quote pairs to detect character speech blocks.
 # Each tuple: (open_char, close_char)
@@ -418,15 +419,88 @@ def _apply_boundary_fades(
     return samples.tobytes()
 
 
-def _merge_wav_files(chunk_paths: List[str], output_path: str, smooth_join_ms: int = 0) -> None:
+def _remove_start_click_from_pcm(
+    data: bytes,
+    sampwidth: int,
+    nchannels: int,
+    framerate: int,
+    trim_ms: int,
+    fade_ms: int,
+    peak_threshold: float = START_CLICK_PEAK_THRESHOLD,
+) -> bytes:
+    """Remove a short synthetic click/burst at the beginning of a PCM chunk.
+
+    CosyVoice can emit a loud 5-10 ms transient before the useful signal.  We
+    only touch 16-bit PCM here because all float WAV chunks are converted to
+    int16 by _read_wav_frames before merge.
+    """
+    if trim_ms <= 0 or sampwidth != 2 or nchannels <= 0 or framerate <= 0:
+        return data
+
+    import array as _arr
+    import sys as _sys
+
+    samples = _arr.array('h')
+    samples.frombytes(data)
+    if _sys.byteorder != 'little':
+        samples.byteswap()
+
+    n_frames = len(samples) // nchannels
+    if n_frames <= 1:
+        return data
+
+    max_trim_frames = min(n_frames - 1, int(framerate * trim_ms / 1000))
+    if max_trim_frames <= 0:
+        return data
+
+    detect_frames = min(max_trim_frames, max(1, int(framerate * 0.003)))
+    detect_samples = detect_frames * nchannels
+    peak = max(abs(v) for v in samples[:detect_samples])
+    if peak < int(32767 * peak_threshold):
+        return data
+
+    quiet_peak = int(32767 * min(peak_threshold * 0.5, 0.015))
+    quiet_window_frames = max(1, int(framerate * 0.0015))
+    search_start = min(max_trim_frames, max(1, int(framerate * 0.003)))
+    trim_frames = min(max_trim_frames, max(1, int(framerate * 0.005)))
+    for frame in range(search_start, max_trim_frames - quiet_window_frames + 1):
+        window_start = frame * nchannels
+        window_end = (frame + quiet_window_frames) * nchannels
+        if max(abs(v) for v in samples[window_start:window_end]) <= quiet_peak:
+            trim_frames = frame
+            break
+
+    del samples[:trim_frames * nchannels]
+
+    fade_frames = min(len(samples) // nchannels, int(framerate * fade_ms / 1000))
+    if fade_frames > 0:
+        for frame in range(fade_frames):
+            factor = (frame + 1) / fade_frames
+            for ch in range(nchannels):
+                idx = frame * nchannels + ch
+                samples[idx] = int(samples[idx] * factor)
+
+    if _sys.byteorder != 'little':
+        samples.byteswap()
+    return samples.tobytes()
+
+
+def _merge_wav_files(
+    chunk_paths: List[str],
+    output_path: str,
+    smooth_join_ms: int = 0,
+    start_declick_ms: int = 0,
+    start_declick_fade_ms: int = 0,
+) -> None:
     """Fast WAV concatenation using Python's stdlib ``wave`` module (O(n)).
 
     Supports both standard PCM and IEEE float-32 WAV chunk files.  Float
     samples are converted to 16-bit PCM on the fly via :func:`_read_wav_frames`.
 
     Optionally applies a short linear fade-out at the tail of each chunk and
-    a fade-in at the head of the next chunk (*smooth_join_ms* > 0) to
-    eliminate audible clicks / crackling at boundaries.
+    a fade-in at the head of the next chunk (*smooth_join_ms* > 0).  When
+    *start_declick_ms* > 0, also removes a short start transient from each
+    chunk before boundary fades are applied.
     """
     import wave
 
@@ -460,6 +534,16 @@ def _merge_wav_files(chunk_paths: List[str], output_path: str, smooth_join_ms: i
                 logger.warning("Skipping unreadable chunk %s: %s", path, exc)
                 continue
 
+            if start_declick_ms > 0:
+                data = _remove_start_click_from_pcm(
+                    data,
+                    out_sampwidth,
+                    out_nchannels,
+                    out_framerate,
+                    start_declick_ms,
+                    start_declick_fade_ms,
+                )
+
             if fade_samples > 0:
                 data = _apply_boundary_fades(
                     data,
@@ -472,12 +556,19 @@ def _merge_wav_files(chunk_paths: List[str], output_path: str, smooth_join_ms: i
             out_w.writeframes(data)
 
     logger.debug(
-        "Merged %d WAV chunks into %s (smooth_join_ms=%d)",
-        n, output_path, smooth_join_ms,
+        "Merged %d WAV chunks into %s (smooth_join_ms=%d, start_declick_ms=%d)",
+        n, output_path, smooth_join_ms, start_declick_ms,
     )
 
 
-def _merge_via_pydub(chunk_paths: List[str], output_path: str, fmt: str, smooth_join_ms: int = 0) -> None:
+def _merge_via_pydub(
+    chunk_paths: List[str],
+    output_path: str,
+    fmt: str,
+    smooth_join_ms: int = 0,
+    start_declick_ms: int = 0,
+    start_declick_fade_ms: int = 0,
+) -> None:
     """Merge non-WAV audio files using pydub with optional crossfade."""
     try:
         from pydub import AudioSegment  # type: ignore
@@ -492,6 +583,10 @@ def _merge_via_pydub(chunk_paths: List[str], output_path: str, fmt: str, smooth_
     combined = None
     for path in chunk_paths:
         seg = AudioSegment.from_file(path)
+        if start_declick_ms > 0 and len(seg) > start_declick_ms:
+            seg = seg[start_declick_ms:]
+            if start_declick_fade_ms > 0:
+                seg = seg.fade_in(start_declick_fade_ms)
         if combined is None:
             combined = seg
         elif smooth_join_ms > 0:
@@ -543,7 +638,13 @@ def _trim_trailing_silence(audio_path: str, tail_ms: int = SILENCE_TAIL_MS) -> N
         logger.debug("Silence trimming failed for %s: %s", audio_path, exc)
 
 
-def _merge_audio_files(chunk_paths: List[str], output_path: str, smooth_join_ms: int = 0) -> None:
+def _merge_audio_files(
+    chunk_paths: List[str],
+    output_path: str,
+    smooth_join_ms: int = 0,
+    start_declick_ms: int = 0,
+    start_declick_fade_ms: int = 0,
+) -> None:
     """Concatenate audio chunk files into *output_path*.
 
     For WAV files uses Python's stdlib ``wave`` module (fast, O(n)).
@@ -556,9 +657,22 @@ def _merge_audio_files(chunk_paths: List[str], output_path: str, smooth_join_ms:
         return
     fmt = Path(output_path).suffix.lstrip(".").lower() or "wav"
     if fmt == "wav":
-        _merge_wav_files(chunk_paths, output_path, smooth_join_ms)
+        _merge_wav_files(
+            chunk_paths,
+            output_path,
+            smooth_join_ms,
+            start_declick_ms,
+            start_declick_fade_ms,
+        )
     else:
-        _merge_via_pydub(chunk_paths, output_path, fmt, smooth_join_ms)
+        _merge_via_pydub(
+            chunk_paths,
+            output_path,
+            fmt,
+            smooth_join_ms,
+            start_declick_ms,
+            start_declick_fade_ms,
+        )
 
 
 class ChunkedAudioGenerator:
@@ -729,7 +843,13 @@ class ChunkedAudioGenerator:
             return False
 
         # Skip merge if the chapter WAV already reflects all current chunks.
-        if self._chapter_wav_is_uptodate(output_file, chunk_paths):
+        start_declick_ms = 0
+        start_declick_fade_ms = 0
+        if getattr(self.config, "tts_chunk_declick_start", False):
+            start_declick_ms = int(getattr(self.config, "tts_chunk_declick_start_ms", 10) or 10)
+            start_declick_fade_ms = int(getattr(self.config, "tts_chunk_declick_fade_ms", 6) or 6)
+
+        if not start_declick_ms and self._chapter_wav_is_uptodate(output_file, chunk_paths):
             logger.info(
                 "Chapter %d WAV is up-to-date, skipping re-merge: %s", chapter_idx, output_file
             )
@@ -742,7 +862,13 @@ class ChunkedAudioGenerator:
 
         # Merge chunks into the chapter output file.
         try:
-            _merge_audio_files(chunk_paths, output_file, smooth_join_ms)
+            _merge_audio_files(
+                chunk_paths,
+                output_file,
+                smooth_join_ms,
+                start_declick_ms,
+                start_declick_fade_ms,
+            )
             logger.info("Chapter %d merged into %s", chapter_idx, output_file)
             return True
         except Exception as exc:

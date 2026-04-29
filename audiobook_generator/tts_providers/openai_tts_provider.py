@@ -300,14 +300,26 @@ class OpenAITTSProvider(BaseTTSProvider):
                 response = self.http_session.request(method, url, timeout=timeout, **kwargs)
                 if response.status_code in TRANSIENT_HTTP_STATUS_CODES:
                     raise requests.HTTPError(
-                        f"Transient HTTP {response.status_code} during {operation}",
+                        self._format_http_error(operation, response, transient=True),
+                        response=response,
+                    )
+                if response.status_code >= 400:
+                    raise requests.HTTPError(
+                        self._format_http_error(operation, response, transient=False),
                         response=response,
                     )
                 response.raise_for_status()
                 return response
             except (requests.RequestException, ValueError) as exc:
                 last_error = exc
-                if attempt == max_attempts:
+                retryable = True
+                if isinstance(exc, requests.HTTPError) and exc.response is not None:
+                    status_code = exc.response.status_code
+                    if 400 <= status_code < 500 and status_code not in TRANSIENT_HTTP_STATUS_CODES:
+                        retryable = False
+                if isinstance(exc, ValueError):
+                    retryable = False
+                if not retryable or attempt == max_attempts:
                     break
                 self._reset_http_session()
                 delay = min(
@@ -327,6 +339,28 @@ class OpenAITTSProvider(BaseTTSProvider):
         raise RuntimeError(
             f"{operation} failed after {max_attempts} attempts: {last_error}"
         ) from last_error
+
+    @staticmethod
+    def _format_http_error(operation: str, response: requests.Response, *, transient: bool) -> str:
+        prefix = "Transient " if transient else ""
+        detail = None
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+
+        if isinstance(payload, dict):
+            detail = payload.get("detail") or payload.get("error") or payload.get("message")
+        elif payload is not None:
+            detail = payload
+
+        if detail is None:
+            body = (response.text or "").strip()
+            if body:
+                detail = body[:500]
+
+        suffix = f": {detail}" if detail else ""
+        return f"{prefix}HTTP {response.status_code} during {operation}{suffix}"
 
     def _resolve_url(self, url: str) -> str:
         if url.startswith(("http://", "https://")) or not self.base_url:

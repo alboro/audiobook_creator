@@ -61,6 +61,22 @@ class GeneralConfig:
             self.tts_chunk_smooth_join_ms = int(_smooth_ms) if _smooth_ms is not None else 30
         except (ValueError, TypeError):
             self.tts_chunk_smooth_join_ms = 30
+        # CosyVoice can emit a short click/burst at the beginning of generated
+        # chunks. This optional pass removes only the chunk head before merging.
+        _declick = getattr(args, 'tts_chunk_declick_start', None)
+        self.tts_chunk_declick_start = (
+            str(_declick).lower() == 'true' if _declick is not None else False
+        )
+        _declick_ms = getattr(args, 'tts_chunk_declick_start_ms', None)
+        try:
+            self.tts_chunk_declick_start_ms = int(_declick_ms) if _declick_ms is not None else 10
+        except (ValueError, TypeError):
+            self.tts_chunk_declick_start_ms = 10
+        _declick_fade_ms = getattr(args, 'tts_chunk_declick_fade_ms', None)
+        try:
+            self.tts_chunk_declick_fade_ms = int(_declick_fade_ms) if _declick_fade_ms is not None else 6
+        except (ValueError, TypeError):
+            self.tts_chunk_declick_fade_ms = 6
         self.openai_api_key = getattr(args, 'openai_api_key', None)
         self.openai_base_url = getattr(args, 'openai_base_url', None)
         self.openai_max_chars = getattr(args, 'openai_max_chars', None)
