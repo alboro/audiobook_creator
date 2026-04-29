@@ -351,6 +351,112 @@ def _read_wav_frames(path: str) -> Tuple[int, int, int, bytes]:
     return nchannels, 2, sample_rate, pcm.tobytes()
 
 
+def _remove_dc_offset(data: bytes, sampwidth: int, nchannels: int) -> bytes:
+    """Subtract the mean (DC bias) from each channel of raw PCM data.
+
+    A non-zero DC offset causes a step-change click at each chunk boundary
+    even if the fade/crossfade brings the amplitude to zero, because the
+    *baseline* is different between chunks.  Removing it beforehand makes
+    every chunk oscillate symmetrically around zero.
+
+    No-ops when |DC| < 1 LSB or when numpy is unavailable.
+    """
+    try:
+        import numpy as np
+        dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
+        dtype = dtype_map.get(sampwidth)
+        if dtype is None:
+            return data
+        samples = np.frombuffer(data, dtype=dtype).astype(np.float32)
+        dc = float(samples.mean())
+        if abs(dc) < 1.0:
+            return data
+        info = np.iinfo(dtype)
+        corrected = np.clip(samples - dc, info.min, info.max).astype(dtype)
+        return corrected.tobytes()
+    except ImportError:
+        return data
+
+
+def _crossfade_pcm(
+    data_a: bytes,
+    data_b: bytes,
+    sampwidth: int,
+    nchannels: int,
+    crossfade_samples: int,
+) -> bytes:
+    """True crossfade: overlap the end of *data_a* with the start of *data_b*.
+
+    Uses complementary cosine ramps (equal-power) so the boundary region
+    always sums to full energy — no volume dip, no click.
+
+    The returned buffer has length:
+        len(data_a) + len(data_b) - crossfade_samples * frame_size
+
+    Falls back to a pure-Python cosine crossfade when NumPy is unavailable
+    (slower but correct).  Falls back to plain concatenation when *crossfade_samples*
+    is 0 or either operand is shorter than the crossfade window.
+    """
+    frame_size = sampwidth * nchannels
+    n_a = len(data_a) // frame_size
+    n_b = len(data_b) // frame_size
+    cf = min(crossfade_samples, n_a, n_b)
+    if cf <= 0:
+        return data_a + data_b
+
+    try:
+        import numpy as np
+        dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
+        dtype = dtype_map.get(sampwidth)
+        if dtype is None:
+            return data_a + data_b
+
+        a = np.frombuffer(data_a, dtype=dtype).reshape(n_a, nchannels).astype(np.float64)
+        b = np.frombuffer(data_b, dtype=dtype).reshape(n_b, nchannels).astype(np.float64)
+
+        t = np.linspace(0.0, 1.0, cf, dtype=np.float64)
+        ramp_down = 0.5 * (1.0 + np.cos(np.pi * t))   # 1 → 0  (cosine)
+        ramp_up   = 0.5 * (1.0 - np.cos(np.pi * t))   # 0 → 1  (cosine)
+
+        region = (a[-cf:] * ramp_down[:, np.newaxis] +
+                  b[:cf]  * ramp_up  [:, np.newaxis])
+
+        info = np.iinfo(dtype)
+        result = np.concatenate([a[:-cf], np.clip(region, info.min, info.max), b[cf:]])
+        return result.astype(dtype).tobytes()
+
+    except ImportError:
+        pass
+
+    # ── Pure-Python fallback (no numpy) ──────────────────────────────────────
+    import array as _arr
+    import math
+    fmt_map = {1: 'b', 2: 'h', 4: 'i'}
+    fmt = fmt_map.get(sampwidth)
+    if fmt is None:
+        return data_a + data_b
+
+    arr_a = _arr.array(fmt, data_a)
+    arr_b = _arr.array(fmt, data_b)
+    n_a_f = len(arr_a) // nchannels
+    n_b_f = len(arr_b) // nchannels
+    cf2 = min(crossfade_samples, n_a_f, n_b_f)
+
+    result = _arr.array(fmt, arr_a[:(n_a_f - cf2) * nchannels])
+    for fi in range(cf2):
+        t = fi / cf2
+        down = 0.5 * (1.0 + math.cos(math.pi * t))
+        up   = 0.5 * (1.0 - math.cos(math.pi * t))
+        for ch in range(nchannels):
+            i_a = (n_a_f - cf2 + fi) * nchannels + ch
+            i_b = fi * nchannels + ch
+            mixed = int(arr_a[i_a] * down + arr_b[i_b] * up)
+            limit = (1 << (sampwidth * 8 - 1)) - 1
+            result.append(max(-limit - 1, min(limit, mixed)))
+    result.extend(arr_b[cf2 * nchannels:])
+    return result.tobytes()
+
+
 def _apply_boundary_fades(
     data: bytes,
     sampwidth: int,
@@ -489,75 +595,83 @@ def _merge_wav_files(
     chunk_paths: List[str],
     output_path: str,
     smooth_join_ms: int = 0,
+    dc_remove: bool = False,
+    gap_ms: int = 0,
     start_declick_ms: int = 0,
     start_declick_fade_ms: int = 0,
 ) -> None:
-    """Fast WAV concatenation using Python's stdlib ``wave`` module (O(n)).
-
-    Supports both standard PCM and IEEE float-32 WAV chunk files.  Float
-    samples are converted to 16-bit PCM on the fly via :func:`_read_wav_frames`.
-
-    Optionally applies a short linear fade-out at the tail of each chunk and
-    a fade-in at the head of the next chunk (*smooth_join_ms* > 0).  When
-    *start_declick_ms* > 0, also removes a short start transient from each
-    chunk before boundary fades are applied.
-    """
+    """Fast WAV concatenation with optional de-click, DC removal, and crossfade."""
     import wave
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    # Determine output WAV params from the first readable chunk.
+    # ── Read all chunks ───────────────────────────────────────────────────────
     out_nchannels = out_sampwidth = out_framerate = None
+    chunks: List[bytes] = []
+
     for cp in chunk_paths:
         try:
-            nc, sw, fr, _ = _read_wav_frames(cp)
-            out_nchannels, out_sampwidth, out_framerate = nc, sw, fr
-            break
-        except Exception:
+            nc, sw, fr, data = _read_wav_frames(cp)
+        except Exception as exc:
+            logger.warning("Skipping unreadable chunk %s: %s", cp, exc)
             continue
+        if out_nchannels is None:
+            out_nchannels, out_sampwidth, out_framerate = nc, sw, fr
+        if start_declick_ms > 0:
+            data = _remove_start_click_from_pcm(
+                data,
+                sw,
+                nc,
+                fr,
+                start_declick_ms,
+                start_declick_fade_ms,
+            )
+        if dc_remove:
+            data = _remove_dc_offset(data, sw, nc)
+        chunks.append(data)
 
-    if out_nchannels is None:
+    if not chunks:
         raise wave.Error("No readable WAV chunks found among %d paths" % len(chunk_paths))
 
-    fade_samples = int(out_framerate * smooth_join_ms / 1000) if smooth_join_ms > 0 else 0
-    n = len(chunk_paths)
+    # ── Build silence gap bytes (inserted between chunks when gap_ms > 0) ────
+    gap_bytes = b''
+    if gap_ms > 0:
+        gap_frames = int(out_framerate * gap_ms / 1000)
+        gap_bytes = bytes(gap_frames * out_sampwidth * out_nchannels)
 
+    # ── Merge with crossfade ──────────────────────────────────────────────────
+    crossfade_samples = int(out_framerate * smooth_join_ms / 1000) if smooth_join_ms > 0 else 0
+
+    combined = chunks[0]
+    for next_data in chunks[1:]:
+        if gap_bytes:
+            # Append silence, then crossfade silence-end → next chunk start
+            combined = _crossfade_pcm(
+                combined + gap_bytes, next_data,
+                out_sampwidth, out_nchannels, crossfade_samples,
+            )
+        else:
+            combined = _crossfade_pcm(
+                combined, next_data,
+                out_sampwidth, out_nchannels, crossfade_samples,
+            )
+
+    # ── Write output ──────────────────────────────────────────────────────────
     with wave.open(output_path, 'wb') as out_w:
         out_w.setnchannels(out_nchannels)
         out_w.setsampwidth(out_sampwidth)
         out_w.setframerate(out_framerate)
-
-        for i, path in enumerate(chunk_paths):
-            try:
-                _, _, _, data = _read_wav_frames(path)
-            except Exception as exc:
-                logger.warning("Skipping unreadable chunk %s: %s", path, exc)
-                continue
-
-            if start_declick_ms > 0:
-                data = _remove_start_click_from_pcm(
-                    data,
-                    out_sampwidth,
-                    out_nchannels,
-                    out_framerate,
-                    start_declick_ms,
-                    start_declick_fade_ms,
-                )
-
-            if fade_samples > 0:
-                data = _apply_boundary_fades(
-                    data,
-                    out_sampwidth,
-                    out_nchannels,
-                    fade_samples,
-                    fade_in=(i > 0),
-                    fade_out=(i < n - 1),
-                )
-            out_w.writeframes(data)
+        out_w.writeframes(combined)
 
     logger.debug(
-        "Merged %d WAV chunks into %s (smooth_join_ms=%d, start_declick_ms=%d)",
-        n, output_path, smooth_join_ms, start_declick_ms,
+        "Merged %d WAV chunks into %s "
+        "(crossfade=%dms, dc_remove=%s, gap=%dms, start_declick=%dms)",
+        len(chunks),
+        output_path,
+        smooth_join_ms,
+        dc_remove,
+        gap_ms,
+        start_declick_ms,
     )
 
 
@@ -566,6 +680,7 @@ def _merge_via_pydub(
     output_path: str,
     fmt: str,
     smooth_join_ms: int = 0,
+    gap_ms: int = 0,
     start_declick_ms: int = 0,
     start_declick_fade_ms: int = 0,
 ) -> None:
@@ -589,7 +704,10 @@ def _merge_via_pydub(
                 seg = seg.fade_in(start_declick_fade_ms)
         if combined is None:
             combined = seg
-        elif smooth_join_ms > 0:
+            continue
+        if gap_ms > 0:
+            combined += AudioSegment.silent(duration=gap_ms, frame_rate=combined.frame_rate)
+        if smooth_join_ms > 0:
             combined = combined.append(seg, crossfade=smooth_join_ms)
         else:
             combined += seg
@@ -642,16 +760,16 @@ def _merge_audio_files(
     chunk_paths: List[str],
     output_path: str,
     smooth_join_ms: int = 0,
+    dc_remove: bool = False,
+    gap_ms: int = 0,
     start_declick_ms: int = 0,
     start_declick_fade_ms: int = 0,
 ) -> None:
     """Concatenate audio chunk files into *output_path*.
 
-    For WAV files uses Python's stdlib ``wave`` module (fast, O(n)).
-    For other formats falls back to pydub.
-
-    If *smooth_join_ms* > 0, a short linear fade-out / fade-in is applied at
-    each chunk boundary to eliminate audible clicks (no pydub needed for WAV).
+    For WAV files uses Python's stdlib ``wave`` module with optional true
+    cosine crossfade, DC offset removal, and silence gap insertion.
+    For other formats falls back to pydub (crossfade only).
     """
     if not chunk_paths:
         return
@@ -661,6 +779,8 @@ def _merge_audio_files(
             chunk_paths,
             output_path,
             smooth_join_ms,
+            dc_remove,
+            gap_ms,
             start_declick_ms,
             start_declick_fade_ms,
         )
@@ -670,6 +790,7 @@ def _merge_audio_files(
             output_path,
             fmt,
             smooth_join_ms,
+            gap_ms,
             start_declick_ms,
             start_declick_fade_ms,
         )
@@ -855,10 +976,12 @@ class ChunkedAudioGenerator:
             )
             return True
 
-        # Smooth join setting from config (default: 30 ms).
+        # Smooth join / crossfade settings from config.
         smooth_join_ms = 0
         if getattr(self.config, "tts_chunk_smooth_join", True):
             smooth_join_ms = int(getattr(self.config, "tts_chunk_smooth_join_ms", 30) or 30)
+        dc_remove = bool(getattr(self.config, "tts_chunk_dc_remove", True))
+        gap_ms = int(getattr(self.config, "tts_chunk_merge_gap_ms", 0) or 0)
 
         # Merge chunks into the chapter output file.
         try:
@@ -866,6 +989,8 @@ class ChunkedAudioGenerator:
                 chunk_paths,
                 output_file,
                 smooth_join_ms,
+                dc_remove,
+                gap_ms,
                 start_declick_ms,
                 start_declick_fade_ms,
             )

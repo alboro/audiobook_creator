@@ -53,6 +53,8 @@ FIELD_SECTIONS: Dict[str, str] = {
     "tts_trim_silence": "tts",
     "tts_chunk_smooth_join": "tts",
     "tts_chunk_smooth_join_ms": "tts",
+    "tts_chunk_dc_remove": "tts",
+    "tts_chunk_merge_gap_ms": "tts",
     "tts_chunk_declick_start": "tts",
     "tts_chunk_declick_start_ms": "tts",
     "tts_chunk_declick_fade_ms": "tts",
@@ -156,7 +158,8 @@ BOOL_FIELDS = {
     "openai_enable_polling",
     "normalize_tsnorm_stress_yo", "normalize_tsnorm_stress_monosyllabic",
     "qwen_stream", "package_m4b", "chunked_audio", "chunked_audio_no_db",
-    "tts_log_text", "tts_chunk_smooth_join", "tts_chunk_declick_start",
+    "tts_log_text", "tts_chunk_smooth_join", "tts_chunk_dc_remove",
+    "tts_chunk_declick_start",
 }
 
 

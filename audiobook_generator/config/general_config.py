@@ -52,15 +52,24 @@ class GeneralConfig:
         _trim = getattr(args, 'tts_trim_silence', None)
         # Default is True; only explicitly setting "false" (string or bool) disables it.
         self.tts_trim_silence = str(_trim).lower() != 'false' if _trim is not None else True
-        # Smooth chunk joining: apply short fade-in/fade-out at chunk boundaries to eliminate
-        # crackling.  Default: True.  Disable for lowest-latency pure-concatenation.
+        # Smooth chunk joining: crossfade chunk boundaries to eliminate crackling.
+        # Default: True. Disable for lowest-latency pure-concatenation.
         _smooth = getattr(args, 'tts_chunk_smooth_join', None)
         self.tts_chunk_smooth_join = str(_smooth).lower() != 'false' if _smooth is not None else True
         _smooth_ms = getattr(args, 'tts_chunk_smooth_join_ms', None)
         try:
             self.tts_chunk_smooth_join_ms = int(_smooth_ms) if _smooth_ms is not None else 30
-        except (ValueError, TypeError):
+        except (TypeError, ValueError):
             self.tts_chunk_smooth_join_ms = 30
+        # DC offset removal: subtract per-chunk mean before merging (default: True).
+        _dc = getattr(args, 'tts_chunk_dc_remove', None)
+        self.tts_chunk_dc_remove = str(_dc).lower() != 'false' if _dc is not None else True
+        # Silence gap between chunks at merge time, ms (default: 0 = disabled).
+        _gap = getattr(args, 'tts_chunk_merge_gap_ms', None)
+        try:
+            self.tts_chunk_merge_gap_ms = int(_gap) if _gap is not None else 0
+        except (TypeError, ValueError):
+            self.tts_chunk_merge_gap_ms = 0
         # CosyVoice can emit a short click/burst at the beginning of generated
         # chunks. This optional pass removes only the chunk head before merging.
         _declick = getattr(args, 'tts_chunk_declick_start', None)
