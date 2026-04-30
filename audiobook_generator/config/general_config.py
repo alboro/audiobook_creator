@@ -86,6 +86,19 @@ class GeneralConfig:
             self.tts_chunk_declick_fade_ms = int(_declick_fade_ms) if _declick_fade_ms is not None else 6
         except (ValueError, TypeError):
             self.tts_chunk_declick_fade_ms = 6
+        # Low-frequency preamble detection and removal.  Some TTS engines
+        # (e.g., CosyVoice) can emit a short low-frequency "breath/ock" burst
+        # before the first actual phoneme.  Enabling this pass detects and
+        # removes that preamble by analysing ZCR and spectral concentration.
+        _lf_preamble = getattr(args, 'tts_chunk_declick_lf_preamble', None)
+        self.tts_chunk_declick_lf_preamble = (
+            str(_lf_preamble).lower() == 'true' if _lf_preamble is not None else False
+        )
+        _lf_fade_ms = getattr(args, 'tts_chunk_declick_lf_preamble_fade_ms', None)
+        try:
+            self.tts_chunk_declick_lf_preamble_fade_ms = int(_lf_fade_ms) if _lf_fade_ms is not None else 8
+        except (ValueError, TypeError):
+            self.tts_chunk_declick_lf_preamble_fade_ms = 8
         self.openai_api_key = getattr(args, 'openai_api_key', None)
         self.openai_base_url = getattr(args, 'openai_base_url', None)
         self.openai_max_chars = getattr(args, 'openai_max_chars', None)

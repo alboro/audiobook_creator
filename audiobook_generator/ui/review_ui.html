@@ -196,6 +196,9 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
                 <template x-if="chunk.has_audio && chunkTimingStr(chunk, i)">
                   <span class="ctiming" x-text="chunkTimingStr(chunk, i)"></span>
                 </template>
+                <template x-if="chunk.has_audio && chunk.created_at">
+                  <span class="ctiming ctiming-pos" x-text="_fmtCreatedAt(chunk.created_at)"></span>
+                </template>
                 <template x-if="chunk.has_audio && chunk.auto_retry_count > 0">
                   <span class="retry-badge" :title="'re-synthesised ' + chunk.auto_retry_count + ' time(s)'" x-text="'↻' + chunk.auto_retry_count"></span>
                 </template>
@@ -907,8 +910,18 @@ function reviewApp() {
       return h > 0 ? h + ':' + mm + ':' + sss : m + ':' + sss;
     },
 
-    _fmtDur(secs) {
-      if (secs == null) return '';
+    _fmtCreatedAt(ts) {
+      if (!ts) return '';
+      const d = new Date(ts * 1000);
+      const yy = String(d.getFullYear()).slice(2);
+      const mo = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return yy + '.' + mo + '.' + dd + ' ' + hh + ':' + mm;
+    },
+
+    _fmtDur(secs) {      if (secs == null) return '';
       if (secs < 60) return secs.toFixed(1) + 's';
       return this._fmtTime(secs);
     },

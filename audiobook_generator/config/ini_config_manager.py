@@ -58,6 +58,8 @@ FIELD_SECTIONS: Dict[str, str] = {
     "tts_chunk_declick_start": "tts",
     "tts_chunk_declick_start_ms": "tts",
     "tts_chunk_declick_fade_ms": "tts",
+    "tts_chunk_declick_lf_preamble": "tts",
+    "tts_chunk_declick_lf_preamble_fade_ms": "tts",
     "tts_log_text": "tts",
     # [tts.openai] -------------------------------------------------------------
     "openai_api_key": "tts.openai",
@@ -166,6 +168,7 @@ BOOL_FIELDS = {
     "qwen_stream", "package_m4b", "chunked_audio", "chunked_audio_no_db",
     "tts_log_text", "tts_chunk_smooth_join", "tts_chunk_dc_remove",
     "tts_chunk_declick_start",
+    "tts_chunk_declick_lf_preamble",
 }
 
 

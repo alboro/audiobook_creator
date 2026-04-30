@@ -335,6 +335,23 @@ def handle_args():
         default=None,
         help="Fade-in length after start de-click trimming.",
     )
+    parser.add_argument(
+        "--tts_chunk_declick_lf_preamble",
+        action="store_const",
+        const=True,
+        default=None,
+        help=(
+            "Detect and remove a low-frequency pre-speech preamble artifact "
+            "(the 'ock' burst some TTS engines emit before the first phoneme). "
+            "Analyses ZCR and spectral concentration; trims up to 350 ms from chunk start."
+        ),
+    )
+    parser.add_argument(
+        "--tts_chunk_declick_lf_preamble_fade_ms",
+        type=int,
+        default=None,
+        help="Fade-in length (ms) after LF-preamble trimming (default: 8).",
+    )
 
     openai_tts_group = parser.add_argument_group(title="openai specific")
     openai_tts_group.add_argument(

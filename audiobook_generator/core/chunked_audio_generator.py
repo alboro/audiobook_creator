@@ -525,8 +525,173 @@ def _apply_boundary_fades(
     return samples.tobytes()
 
 
-def _remove_start_click_from_pcm(
+# LF-preamble detection thresholds
+_LF_PREAMBLE_ZCR_ARTIFACT_MAX = 0.040  # avg ZCR over first 60ms must be below this
+_LF_PREAMBLE_LFR_ARTIFACT_MIN = 0.68   # peak LF ratio (LPF-proxy) over first 60ms
+_LF_PREAMBLE_RMS_MIN = 0.012           # avg RMS of artifact zone (rel. to local peak)
+_LF_PREAMBLE_SPEECH_ZCR_MIN = 0.070   # ZCR above this → speech has started
+_LF_PREAMBLE_CHECK_MS = 350           # only look within the first N ms
+_LF_PREAMBLE_ARTIFACT_ZONE_MS = 60    # initial "artifact zone" to characterise
+_LF_PREAMBLE_WINDOW_MS = 20           # analysis window per step
+_LF_PREAMBLE_HOP_MS = 10             # hop between windows
+_LF_PREAMBLE_LPF_MS = 2.0            # moving-average window → ~500 Hz LPF proxy
+
+
+def _lf_preamble_trim_frames(
+    samples,       # array.array('h') — int16 PCM, little-endian
+    nchannels: int,
+    framerate: int,
+) -> int:
+    """Return the number of frames to remove from the start to skip a low-frequency
+    preamble artifact (the "ock" TTS pre-phonation burst).
+
+    Detection strategy:
+      1. Compute average ZCR and peak LF-ratio over the first
+         _LF_PREAMBLE_ARTIFACT_ZONE_MS (60 ms) — the "artifact zone".
+      2. If avg ZCR < _LF_PREAMBLE_ZCR_ARTIFACT_MAX  AND
+            peak LFR > _LF_PREAMBLE_LFR_ARTIFACT_MIN  AND
+            avg RMS  > _LF_PREAMBLE_RMS_MIN            → artifact detected.
+      3. Walk forward from the artifact zone's end to find the first window
+         where ZCR ≥ _LF_PREAMBLE_SPEECH_ZCR_MIN (speech onset).
+      4. Return the speech onset frame index as the trim point.
+
+    Returns 0 if no preamble is detected.
+    """
+    n_frames = len(samples) // nchannels
+    max_check = min(n_frames, int(framerate * _LF_PREAMBLE_CHECK_MS / 1000))
+    artifact_zone = min(max_check, int(framerate * _LF_PREAMBLE_ARTIFACT_ZONE_MS / 1000))
+    win_fr = max(2, int(framerate * _LF_PREAMBLE_WINDOW_MS / 1000))
+    hop_fr = max(1, int(framerate * _LF_PREAMBLE_HOP_MS / 1000))
+    lpf_fr = max(1, int(framerate * _LF_PREAMBLE_LPF_MS / 1000))
+
+    if max_check < win_fr * 2:
+        return 0
+
+    # Build normalised mono view of the first max_check frames
+    total_look = min(max_check + win_fr, n_frames)
+    if nchannels == 1:
+        raw = [samples[i] for i in range(total_look)]
+    else:
+        raw = [
+            sum(samples[i * nchannels + ch] for ch in range(nchannels)) / nchannels
+            for i in range(total_look)
+        ]
+
+    abs_peak = max(abs(v) for v in raw) if raw else 0
+    if abs_peak < 32767 * 0.01:      # practically silent file — nothing to trim
+        return 0
+    norm = [v / abs_peak for v in raw]
+
+    def _analyze(start: int):
+        """Return (zcr, lfr, rms) for a window starting at *start* (frame index)."""
+        end = min(len(norm), start + win_fr)
+        w = norm[start:end]
+        n = len(w)
+        if n < 2:
+            return 0.0, 0.0, 0.0
+        # RMS
+        rms = (sum(v * v for v in w) / n) ** 0.5
+        # ZCR
+        zcr = sum(1 for i in range(1, n) if (w[i] >= 0) != (w[i - 1] >= 0)) / (2 * n)
+        # LF-ratio via moving-average LPF proxy (rectangular, cutoff ~1/lpf_fr Hz per sample)
+        acc = 0.0
+        lpf = []
+        for i, v in enumerate(w):
+            acc += v
+            if i >= lpf_fr:
+                acc -= w[i - lpf_fr]
+            lpf.append(acc / min(i + 1, lpf_fr))
+        lpf_rms = (sum(v * v for v in lpf) / n) ** 0.5
+        lfr = lpf_rms / (rms + 1e-9)
+        return zcr, lfr, rms
+
+    # ── Characterise the artifact zone (first 60 ms) ─────────────────────────
+    artifact_zcrs = []
+    artifact_rms_vals = []
+    artifact_max_lfr = 0.0
+
+    for start in range(0, artifact_zone, hop_fr):
+        zcr, lfr, rms = _analyze(start)
+        artifact_zcrs.append(zcr)
+        artifact_rms_vals.append(rms)
+        artifact_max_lfr = max(artifact_max_lfr, lfr)
+
+    if not artifact_zcrs:
+        return 0
+
+    avg_zcr = sum(artifact_zcrs) / len(artifact_zcrs)
+    avg_rms = sum(artifact_rms_vals) / len(artifact_rms_vals)
+
+    if avg_rms < _LF_PREAMBLE_RMS_MIN:
+        return 0  # starts with silence — nothing to trim
+    if avg_zcr >= _LF_PREAMBLE_ZCR_ARTIFACT_MAX:
+        return 0  # ZCR too high — looks like normal speech or noise
+    if artifact_max_lfr < _LF_PREAMBLE_LFR_ARTIFACT_MIN:
+        return 0  # signal not dominated by low frequencies
+
+    # ── Walk forward to find where speech begins ────────────────────────────
+    speech_onset_frame = 0
+    search_start = max(hop_fr, artifact_zone - win_fr)
+    for start in range(search_start, max_check, hop_fr):
+        zcr, _lfr, _rms = _analyze(start)
+        if zcr >= _LF_PREAMBLE_SPEECH_ZCR_MIN:
+            speech_onset_frame = start
+            break
+
+    if speech_onset_frame <= 0:
+        return 0  # no speech found after artifact — don't trim
+
+    logger.debug(
+        "LF preamble detected: trim=%.0f ms "
+        "(avg_ZCR=%.3f max_LFR=%.3f avg_RMS=%.3f), speech onset at %.0f ms",
+        speech_onset_frame * 1000.0 / framerate,
+        avg_zcr, artifact_max_lfr, avg_rms,
+        speech_onset_frame * 1000.0 / framerate,
+    )
+    return speech_onset_frame
+
+
+def _remove_lf_preamble_from_pcm(
     data: bytes,
+    sampwidth: int,
+    nchannels: int,
+    framerate: int,
+    fade_ms: int,
+) -> bytes:
+    """Detect and remove a low-frequency pre-speech preamble artifact from PCM data.
+
+    Only operates on 16-bit PCM.  Returns *data* unchanged when no artifact is found.
+    """
+    if sampwidth != 2 or nchannels <= 0 or framerate <= 0:
+        return data
+
+    import array as _arr
+    import sys as _sys
+
+    samples = _arr.array('h')
+    samples.frombytes(data)
+    if _sys.byteorder != 'little':
+        samples.byteswap()
+
+    trim_frames = _lf_preamble_trim_frames(samples, nchannels, framerate)
+    if trim_frames <= 0:
+        return data
+
+    del samples[:trim_frames * nchannels]
+
+    fade_frames = min(len(samples) // nchannels, int(framerate * fade_ms / 1000))
+    for frame in range(fade_frames):
+        factor = (frame + 1) / fade_frames
+        for ch in range(nchannels):
+            idx = frame * nchannels + ch
+            samples[idx] = int(samples[idx] * factor)
+
+    if _sys.byteorder != 'little':
+        samples.byteswap()
+    return samples.tobytes()
+
+
+def _remove_start_click_from_pcm(    data: bytes,
     sampwidth: int,
     nchannels: int,
     framerate: int,
@@ -599,6 +764,7 @@ def _merge_wav_files(
     gap_ms: int = 0,
     start_declick_ms: int = 0,
     start_declick_fade_ms: int = 0,
+    lf_preamble_fade_ms: int = 0,
 ) -> None:
     """Fast WAV concatenation with optional de-click, DC removal, and crossfade."""
     import wave
@@ -626,6 +792,8 @@ def _merge_wav_files(
                 start_declick_ms,
                 start_declick_fade_ms,
             )
+        if lf_preamble_fade_ms > 0:
+            data = _remove_lf_preamble_from_pcm(data, sw, nc, fr, lf_preamble_fade_ms)
         if dc_remove:
             data = _remove_dc_offset(data, sw, nc)
         chunks.append(data)
@@ -665,13 +833,14 @@ def _merge_wav_files(
 
     logger.debug(
         "Merged %d WAV chunks into %s "
-        "(crossfade=%dms, dc_remove=%s, gap=%dms, start_declick=%dms)",
+        "(crossfade=%dms, dc_remove=%s, gap=%dms, start_declick=%dms, lf_preamble=%s)",
         len(chunks),
         output_path,
         smooth_join_ms,
         dc_remove,
         gap_ms,
         start_declick_ms,
+        f"fade={lf_preamble_fade_ms}ms" if lf_preamble_fade_ms else "off",
     )
 
 
@@ -683,6 +852,7 @@ def _merge_via_pydub(
     gap_ms: int = 0,
     start_declick_ms: int = 0,
     start_declick_fade_ms: int = 0,
+    lf_preamble_fade_ms: int = 0,
 ) -> None:
     """Merge non-WAV audio files using pydub with optional crossfade."""
     try:
@@ -702,6 +872,18 @@ def _merge_via_pydub(
             seg = seg[start_declick_ms:]
             if start_declick_fade_ms > 0:
                 seg = seg.fade_in(start_declick_fade_ms)
+        if lf_preamble_fade_ms > 0:
+            import numpy as _np
+            import array as _arr
+            _raw = seg.get_array_of_samples()
+            _data = _arr.array('h', _raw)
+            _nc = seg.channels
+            _fr = seg.frame_rate
+            _trim = _lf_preamble_trim_frames(_data, _nc, _fr)
+            if _trim > 0:
+                seg = seg[int(_trim * 1000.0 / _fr):]
+                if lf_preamble_fade_ms > 0:
+                    seg = seg.fade_in(lf_preamble_fade_ms)
         if combined is None:
             combined = seg
             continue
@@ -764,6 +946,7 @@ def _merge_audio_files(
     gap_ms: int = 0,
     start_declick_ms: int = 0,
     start_declick_fade_ms: int = 0,
+    lf_preamble_fade_ms: int = 0,
 ) -> None:
     """Concatenate audio chunk files into *output_path*.
 
@@ -783,6 +966,7 @@ def _merge_audio_files(
             gap_ms,
             start_declick_ms,
             start_declick_fade_ms,
+            lf_preamble_fade_ms,
         )
     else:
         _merge_via_pydub(
@@ -793,6 +977,7 @@ def _merge_audio_files(
             gap_ms,
             start_declick_ms,
             start_declick_fade_ms,
+            lf_preamble_fade_ms,
         )
 
 
@@ -970,7 +1155,13 @@ class ChunkedAudioGenerator:
             start_declick_ms = int(getattr(self.config, "tts_chunk_declick_start_ms", 10) or 10)
             start_declick_fade_ms = int(getattr(self.config, "tts_chunk_declick_fade_ms", 6) or 6)
 
-        if not start_declick_ms and self._chapter_wav_is_uptodate(output_file, chunk_paths):
+        lf_preamble_fade_ms = 0
+        if getattr(self.config, "tts_chunk_declick_lf_preamble", False):
+            lf_preamble_fade_ms = int(
+                getattr(self.config, "tts_chunk_declick_lf_preamble_fade_ms", 8) or 8
+            )
+
+        if not start_declick_ms and not lf_preamble_fade_ms and self._chapter_wav_is_uptodate(output_file, chunk_paths):
             logger.info(
                 "Chapter %d WAV is up-to-date, skipping re-merge: %s", chapter_idx, output_file
             )
@@ -993,6 +1184,7 @@ class ChunkedAudioGenerator:
                 gap_ms,
                 start_declick_ms,
                 start_declick_fade_ms,
+                lf_preamble_fade_ms,
             )
             logger.info("Chapter %d merged into %s", chapter_idx, output_file)
             return True

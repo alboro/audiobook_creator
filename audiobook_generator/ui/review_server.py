@@ -235,6 +235,12 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
         h = _sentence_hash(chunk)
         audio_path = _find_chunk_path(dir, chapter_key, h)
         dur = _get_dur(h, audio_path) if audio_path else None
+        created_at: float | None = None
+        if audio_path:
+            try:
+                created_at = Path(audio_path).stat().st_mtime
+            except OSError:
+                pass
         result.append({
             "idx": i,
             "text": chunk,
@@ -246,6 +252,8 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
             "auto_retry_count": retry_counts.get(h, 0),
             # WAV duration in seconds (null when audio not yet synthesised)
             "duration_s": round(dur, 3) if dur is not None else None,
+            # Unix timestamp (seconds) when the audio file was last modified
+            "created_at": round(created_at) if created_at is not None else None,
         })
     return result
 
