@@ -1112,18 +1112,12 @@ class TestStressAmbiguityLLMNormalizer(unittest.TestCase):
                 )
             )
 
-            def fake_choose_batch(items, **kwargs):
-                selections = {}
-                for item in items:
-                    if item.item_id.endswith("0001"):
-                        selections[item.item_id] = "variant_2"
-                    elif item.item_id.endswith("0002"):
-                        selections[item.item_id] = "variant_1"
-                    else:
-                        selections[item.item_id] = "original"
-                return selections
+            def fake_complete(*, user_prompt, **kwargs):
+                # item 0001 (first «беды») → 1.2 (variant_2 = nom.pl.)
+                # item 0002 (second «беды») → 2.1 (variant_1 = gen.sg.)
+                return "1.2\n2.1"
 
-            normalizer.choice_service.choose_batch = fake_choose_batch
+            normalizer.choice_service.llm.complete = fake_complete
             result = normalizer.normalize("После беды пришли новые беды.")
             self.assertEqual(
                 result,
@@ -1196,17 +1190,7 @@ class TestStressAmbiguityLLMNormalizer(unittest.TestCase):
                     normalize_pronunciation_lexicon_db=str(db_path),
                 )
             )
-            normalizer.choice_service.choose_batch = lambda items, **kwargs: {
-                items[0].item_id: MagicMock(
-                    option_id="variant_2",
-                    custom_text=None,
-                    cacheable=False,
-                    reason="Context says genitive singular",
-                    source="llm",
-                    has_custom_text=False,
-                    resolved_option_id=lambda: "variant_2",
-                )
-            }
+            normalizer.choice_service.llm.complete = lambda *, user_prompt, **kwargs: "1.2"
             result = normalizer.normalize("После беды.")
             artifacts = normalizer.get_post_step_artifacts(
                 input_text="После беды.",

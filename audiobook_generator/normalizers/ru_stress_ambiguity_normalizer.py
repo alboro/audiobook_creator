@@ -36,17 +36,17 @@ def _count_vowels(word: str) -> int:
     """Return the number of vowel characters (i.e. syllables) in the word."""
     return sum(1 for ch in word if ch in _RUSSIAN_VOWELS)
 
-STRESS_AMBIGUITY_CHOICE_SYSTEM_PROMPT = """Ты определяешь правильное ударение для слов русского текста, подготовленного для синтеза речи (TTS).
+STRESS_AMBIGUITY_CHOICE_SYSTEM_PROMPT = """Расставь ударения в тексте для TTS.
 
-Для каждого элемента: опираясь на контекст предложения и граммемы из поля hint, выбери вариант произношения, который точно соответствует синтаксической роли слова в этом предложении.
+В каждой строке — контекст предложения, где неоднозначное слово заменено вариантами:
+  (N.1.форма:грамматика|N.2.форма:грамматика)
+N — номер слова в пакете. Подсказка после «:» необязательна.
 
-Правила:
-- Выбирай тот вариант, граммемы которого соответствуют роли слова в предложении из поля context.
-- Если контекст недостаточен для однозначного выбора — возвращай original.
-- Если ни один из предложенных вариантов не подходит и ты уверен в лучшем — укажи custom_text с корректным ударением.
-- Не изменяй контекст и соседние слова.
-- Возвращай только JSON точно в такой форме:
-{"selections":[{"id":"item-1","option_id":"option-id","custom_text":"","cacheable":false,"reason":"кратко"}]}"""
+Ответ — ТОЛЬКО список выборов, по одному на строку, формат N.K:
+  1.2
+  2.1
+Если контекст не позволяет однозначно выбрать — пиши N.0.
+Никаких пояснений."""
 
 
 def _get_stress_ambiguity_prompt(config) -> str:
@@ -79,7 +79,7 @@ class StressAmbiguityCandidate:
 
 class StressAmbiguityLLMNormalizer(BaseNormalizer):
     STEP_NAME = "ru_llm_stress_ambiguity"
-    STEP_VERSION = 3
+    STEP_VERSION = 4
 
     def __init__(self, config: GeneralConfig):
         if is_russian_language(config.language):
@@ -189,14 +189,28 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
             unit_count,
             len(batch),
         )
-        selections = self.choice_service.choose_batch(
-            batch,
-            target_language=self.config.language,
+
+        # Render compact inline prompt and send to LLM
+        prompt_text, index = self._render_compact_prompt(batch)
+        response_text = self.choice_service.llm.complete(
+            user_prompt=prompt_text,
             system_prompt=_get_stress_ambiguity_prompt(self.config),
             model=self.get_normalizer_model(),
             temperature=0,
-            use_cache=False,
         )
+
+        # Parse N.K response lines
+        selections = self._parse_compact_response(response_text, index)
+
+        # Fill fallbacks for items LLM skipped
+        for entry in index:
+            if entry["item_id"] not in selections:
+                selections[entry["item_id"]] = NormalizerLLMChoiceSelection(
+                    item_id=entry["item_id"],
+                    option_id="original",
+                    source="fallback",
+                )
+
         normalized_selections = {
             item_id: self._coerce_selection(item_id, selection)
             for item_id, selection in selections.items()
@@ -411,12 +425,10 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
         unit_count: int,
     ) -> dict[str, str]:
         batch = self._deserialize_batch(unit)
+        prompt_text, _ = self._render_compact_prompt(batch)
         return {
             "00_choice_system_prompt.txt": _get_stress_ambiguity_prompt(self.config),
-            "01_choice_user_prompt.txt": self.choice_service.render_user_prompt(
-                batch,
-                target_language=self.config.language,
-            ),
+            "01_choice_user_prompt.txt": prompt_text,
         }
 
     def _collect_candidates(self, text: str) -> list[StressAmbiguityCandidate]:
@@ -527,6 +539,94 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
             )
             seen_texts.add(preserved)
         return tuple(options)
+
+    @staticmethod
+    def _render_compact_prompt(
+        items: list[NormalizerLLMChoiceItem],
+    ) -> tuple[str, list[dict]]:
+        """Render compact inline prompt and index for response parsing.
+
+        Each item's source_text is replaced inline in its context sentence:
+          Слово (1.1.форма:грамматика|1.2.форма).
+
+        Multiple items from the same sentence appear on the same line.
+
+        Returns:
+            prompt_text: the text to send to LLM
+            index: list of {"num": N, "item_id": ..., "options": {"1": id, ...}}
+        """
+        # Group items by context sentence, preserving insertion order
+        ctx_order: list[str] = []
+        ctx_items: dict[str, list[tuple[int, NormalizerLLMChoiceItem]]] = {}
+        for i, item in enumerate(items, start=1):
+            ctx = item.context
+            if ctx not in ctx_items:
+                ctx_order.append(ctx)
+                ctx_items[ctx] = []
+            ctx_items[ctx].append((i, item))
+
+        lines: list[str] = []
+        index: list[dict] = []
+
+        for ctx in ctx_order:
+            line = ctx
+            for num, item in ctx_items[ctx]:
+                opt_map: dict[str, str] = {"0": "original"}
+                parts: list[str] = []
+                k = 1
+                for option in item.options:
+                    if option.option_id == "original":
+                        continue
+                    opt_map[str(k)] = option.option_id
+                    part = f"{num}.{k}.{option.text}"
+                    if option.hint:
+                        part += f":{option.hint}"
+                    parts.append(part)
+                    k += 1
+                inline = "(" + "|".join(parts) + ")"
+                if item.source_text in line:
+                    line = line.replace(item.source_text, inline, 1)
+                else:
+                    line += f" [{item.source_text}→{inline}]"
+                index.append({"num": num, "item_id": item.item_id, "options": opt_map})
+            lines.append(line)
+
+        return "\n".join(lines), index
+
+    @staticmethod
+    def _parse_compact_response(
+        response_text: str,
+        index: list[dict],
+    ) -> dict[str, NormalizerLLMChoiceSelection]:
+        """Parse compact ``N.K`` response lines into item_id → selection."""
+        num_to_entry = {entry["num"]: entry for entry in index}
+        result: dict[str, NormalizerLLMChoiceSelection] = {}
+        for line in response_text.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            m = re.search(r'\b(\d+)\.(\d+)\b', line)
+            if not m:
+                continue
+            item_num = int(m.group(1))
+            opt_key = m.group(2)
+            entry = num_to_entry.get(item_num)
+            if not entry:
+                logger.warning("Compact response: unknown item number %d", item_num)
+                continue
+            option_id = entry["options"].get(opt_key)
+            if option_id is None:
+                logger.warning(
+                    "Compact response: unknown option %s for item %d, using original",
+                    opt_key, item_num,
+                )
+                option_id = "original"
+            result[entry["item_id"]] = NormalizerLLMChoiceSelection(
+                item_id=entry["item_id"],
+                option_id=option_id,
+                source="llm",
+            )
+        return result
 
     def _extract_context(self, text: str, start: int, end: int) -> str:
         left = start

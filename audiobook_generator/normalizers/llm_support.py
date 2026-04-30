@@ -491,6 +491,7 @@ def resolve_normalizer_llm_settings(config: GeneralConfig) -> NormalizerLLMSetti
         or os.getenv("OPENAI_API_KEY")
     )
 
+    _effort = getattr(config, "normalize_reasoning_effort", None)
     return NormalizerLLMSettings(
         provider=provider,
         model=model,
@@ -500,7 +501,7 @@ def resolve_normalizer_llm_settings(config: GeneralConfig) -> NormalizerLLMSetti
         system_prompt=system_prompt,
         user_prompt_template=user_prompt_template,
         choice_cache_path=str(_resolve_choice_cache_path(config)),
-        reasoning_effort=getattr(config, "normalize_reasoning_effort", None) or None,
+        reasoning_effort=_effort if isinstance(_effort, str) and _effort.strip() else None,
     )
 
 
