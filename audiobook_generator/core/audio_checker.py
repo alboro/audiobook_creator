@@ -31,7 +31,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+import json
+import shlex
+import subprocess
 import sys
+import tempfile
 import unicodedata
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
@@ -214,12 +218,153 @@ class AudioChecker:
         self._model = None  # lazy-loaded
         self._dll_dir_handles = []
         self._cuda_runtime_prepared = False
+        self._reference_check_command = getattr(config, "audio_reference_check_command", None) if config else None
+        self._reference_check_threshold = self._coerce_optional_float(
+            getattr(config, "audio_reference_check_threshold", None) if config else None
+        )
+        self._reference_check_timeout = self._coerce_timeout(
+            getattr(config, "audio_reference_check_timeout", None) if config else None
+        )
+        self._reference_check_cache_dir = (
+            getattr(config, "audio_reference_check_cache_dir", None) if config else None
+        )
+        self._reference_check_stress = (
+            getattr(config, "audio_reference_check_stress", None) if config else None
+        ) or "preserve"
+        self._ffmpeg_path = getattr(config, "ffmpeg_path", None) if config else None
         # Pre-compare normalizer: expand abbreviations/numbers before similarity scoring.
         # Built from config language if available, otherwise use default "ru".
         _lang = getattr(config, "language", language) if config else language
         self._pre_compare = _build_pre_compare_normalizer(_lang)
 
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_optional_float(value) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _coerce_timeout(value) -> int:
+        if value in (None, ""):
+            return 120
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 120
+
+    def _reference_check_enabled(self) -> bool:
+        return bool(self._reference_check_command)
+
+    def _reference_check_command_parts(self) -> list[str]:
+        command = str(self._reference_check_command or "").strip()
+        if not command:
+            return []
+        command_path = command.strip("\"'")
+        if os.path.exists(command_path):
+            return [command_path]
+        return shlex.split(command, posix=(os.name != "nt"))
+
+    def _run_reference_check(self, audio_file: Path, original_text: str) -> dict:
+        """Run an external reference-audio checker and return its JSON payload.
+
+        Contract expected from the external tool:
+          stdout: one JSON object with at least {"status": "measured", "score": <number>}
+          exit code: 0 for a successful measurement, non-zero for tool errors
+
+        The external tool does not decide book-level quality by default.  This
+        class compares the returned score with audio_reference_check_threshold.
+        """
+        if not self._reference_check_enabled():
+            return {
+                "status": None,
+                "score": None,
+                "threshold": self._reference_check_threshold,
+                "payload": None,
+            }
+
+        parts = self._reference_check_command_parts()
+        if not parts:
+            raise RuntimeError("audio_reference_check_command is empty")
+
+        text_file = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                suffix=".txt",
+                delete=False,
+            ) as tmp:
+                tmp.write(original_text)
+                text_file = tmp.name
+
+            cmd = [
+                *parts,
+                "reference-compare",
+                "--audio",
+                str(audio_file),
+                "--text-file",
+                text_file,
+                "--language",
+                self.language,
+                "--json",
+                "--reference-stress",
+                str(self._reference_check_stress),
+            ]
+            if self._reference_check_cache_dir:
+                cmd.extend(["--cache-dir", str(self._reference_check_cache_dir)])
+            else:
+                cmd.extend([
+                    "--cache-dir",
+                    str(self.output_folder / "wav" / "_reference_cache"),
+                ])
+            if self._ffmpeg_path:
+                cmd.extend(["--ffmpeg-path", str(self._ffmpeg_path)])
+
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self._reference_check_timeout,
+                check=False,
+            )
+            stdout = proc.stdout.strip()
+            if proc.returncode != 0:
+                stderr = proc.stderr.strip()
+                raise RuntimeError(
+                    f"reference checker failed with exit code {proc.returncode}: {stderr or stdout}"
+                )
+            if not stdout:
+                raise RuntimeError("reference checker returned empty stdout")
+            payload = json.loads(stdout.splitlines()[-1])
+            score = payload.get("score")
+            if score is None:
+                raise RuntimeError("reference checker JSON has no score")
+            score_f = float(score)
+            threshold = self._reference_check_threshold
+            if threshold is None:
+                status = "measured"
+            else:
+                status = "suspicious" if score_f > threshold else "ok"
+            return {
+                "status": status,
+                "score": score_f,
+                "threshold": threshold,
+                "payload": payload,
+            }
+        finally:
+            if text_file:
+                try:
+                    Path(text_file).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def _prepare_windows_cuda_runtime(self) -> None:
         if self._cuda_runtime_prepared or os.name != "nt" or str(self._device).lower() != "cuda":
@@ -338,19 +483,6 @@ class AudioChecker:
         """
         from audiobook_generator.core.audio_chunk_store import AudioChunkStore
         assert isinstance(store, AudioChunkStore)
-
-        # Pre-flight: verify faster-whisper is importable before processing any files.
-        try:
-            import faster_whisper  # noqa: F401
-        except ImportError:
-            raise RuntimeError(
-                "faster-whisper is not installed or failed to import.\n"
-                "Install it with:\n"
-                "    pip install faster-whisper\n"
-                "On Windows you may also need the Microsoft Visual C++ 2019 Redistributable:\n"
-                "    https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
-                "If you use CUDA, make sure cuBLAS and cuDNN are available (see faster-whisper docs)."
-            )
 
         counters = {"checked": 0, "disputed": 0, "skipped": 0}
 
@@ -483,12 +615,57 @@ class AudioChecker:
         # dynamically in the Review UI by comparing similarity against the
         # configured threshold — no static label is written to the DB.
         status_label = "DISPUTED" if sim < self.threshold else "ok"
+        is_disputed = sim < self.threshold
         logger.info(
             "  [%s] %s  sim=%.2f  %s | orig: %s",
             chapter_key, sentence_hash[:10], sim, status_label, original_text[:60],
         )
-        if sim < self.threshold:
+        if is_disputed:
             counters["disputed"] += 1
+
+        reference_check = {
+            "status": None,
+            "score": None,
+            "threshold": self._reference_check_threshold,
+            "payload": None,
+        }
+        if self._reference_check_enabled():
+            try:
+                reference_check = self._run_reference_check(audio_file, original_text)
+                counters.setdefault("reference_checked", 0)
+                counters.setdefault("reference_suspicious", 0)
+                counters["reference_checked"] += 1
+                if reference_check["status"] == "suspicious":
+                    counters["reference_suspicious"] += 1
+                    if not is_disputed:
+                        counters["disputed"] += 1
+                        is_disputed = True
+                logger.info(
+                    "  [%s] %s  reference_score=%s  reference_status=%s",
+                    chapter_key,
+                    sentence_hash[:10],
+                    (
+                        f"{reference_check['score']:.4f}"
+                        if reference_check["score"] is not None
+                        else "n/a"
+                    ),
+                    reference_check["status"],
+                )
+            except Exception as exc:
+                counters.setdefault("reference_errors", 0)
+                counters["reference_errors"] += 1
+                reference_check = {
+                    "status": "error",
+                    "score": None,
+                    "threshold": self._reference_check_threshold,
+                    "payload": {"error": str(exc)},
+                }
+                logger.warning(
+                    "  [%s] %s  reference-check error: %s",
+                    chapter_key,
+                    sentence_hash[:10],
+                    exc,
+                )
 
         # Always persist the similarity score so the Review UI can dynamically
         # re-classify entries when the threshold changes.
@@ -499,6 +676,14 @@ class AudioChecker:
             transcription=transcription,
             similarity=sim,
             raw_transcription=transcription,
+            reference_check_score=reference_check["score"],
+            reference_check_threshold=reference_check["threshold"],
+            reference_check_status=reference_check["status"],
+            reference_check_payload=(
+                json.dumps(reference_check["payload"], ensure_ascii=False)
+                if reference_check["payload"] is not None
+                else None
+            ),
         )
 
 

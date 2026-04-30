@@ -73,6 +73,40 @@ def handle_args():
         help="Inference device for Whisper: cpu or cuda (default: cpu).",
     )
     parser.add_argument(
+        "--audio_reference_check_command",
+        default=None,
+        help=(
+            "Optional external reference-audio checker command. "
+            "Called as: <command> reference-compare --audio <file> --text-file <file> --language <lang>."
+        ),
+    )
+    parser.add_argument(
+        "--audio_reference_check_threshold",
+        type=float,
+        default=None,
+        help=(
+            "Reference-check score threshold above which a chunk is marked suspicious. "
+            "Only used when audio_reference_check_command is set."
+        ),
+    )
+    parser.add_argument(
+        "--audio_reference_check_timeout",
+        type=int,
+        default=None,
+        help="Timeout in seconds for one external reference-check call (default: 120).",
+    )
+    parser.add_argument(
+        "--audio_reference_check_cache_dir",
+        default=None,
+        help="Cache directory passed to the external reference checker for generated reference audio.",
+    )
+    parser.add_argument(
+        "--audio_reference_check_stress",
+        choices=["auto", "preserve", "strip"],
+        default=None,
+        help="Stress handling passed to the external reference checker (default: auto).",
+    )
+    parser.add_argument(
         "--audio_auto_check_threshold",
         type=float,
         default=None,

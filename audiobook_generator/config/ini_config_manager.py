@@ -138,6 +138,11 @@ FIELD_SECTIONS: Dict[str, str] = {
     "audio_check_device": "audio_check",
     "audio_auto_check_threshold": "audio_check",
     "audio_auto_retry": "audio_check",
+    "audio_reference_check_command": "audio_check",
+    "audio_reference_check_threshold": "audio_check",
+    "audio_reference_check_timeout": "audio_check",
+    "audio_reference_check_cache_dir": "audio_check",
+    "audio_reference_check_stress": "audio_check",
     # [m4b] --------------------------------------------------------------------
     "package_m4b": "m4b",
     "chunked_audio": "m4b",

@@ -56,6 +56,66 @@ def test_check_one_file_reuses_fresh_cached_raw_transcription():
         assert counters == {"checked": 1, "disputed": 0, "skipped": 0}
 
 
+def test_check_one_file_runs_reference_check_when_transcription_is_cached():
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        audio_path = output_dir / "wav" / "chunks" / "0001_Test" / "hash_cached.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"fake wav")
+
+        store = AudioChunkStore(output_dir / "wav" / "_state" / "audio_chunks.sqlite3")
+        store.save_checked_chunk(
+            "0001_Test",
+            "hash_cached",
+            "Приве́т, мир.",
+            "Привет мир",
+            0.99,
+            raw_transcription="Привет мир",
+        )
+
+        checker = AudioChecker(output_folder=output_dir, threshold=0.5)
+        checker._pre_compare = None
+        checker._reference_check_command = "dummy-auditor"
+        checker._reference_check_threshold = 0.85
+        transcribe_called = False
+        reference_called = False
+
+        def fake_transcribe(_path):
+            nonlocal transcribe_called
+            transcribe_called = True
+            return "не должно вызываться"
+
+        def fake_reference_check(_audio_file, original_text):
+            nonlocal reference_called
+            reference_called = True
+            assert original_text == "Приве́т, мир."
+            return {
+                "status": "ok",
+                "score": 0.12,
+                "threshold": 0.85,
+                "payload": {"score": 0.12},
+            }
+
+        checker._transcribe = fake_transcribe
+        checker._run_reference_check = fake_reference_check
+        counters = {"checked": 0, "disputed": 0, "skipped": 0}
+
+        checker._check_one_file(
+            audio_path,
+            "0001_Test",
+            "hash_cached",
+            "Приве́т, мир.",
+            store,
+            counters,
+        )
+
+        assert transcribe_called is False
+        assert reference_called is True
+        assert counters["checked"] == 1
+        assert counters["disputed"] == 0
+        assert counters["reference_checked"] == 1
+
+
 def test_check_one_file_persists_checked_chunk_cache_after_successful_run():
     with tempfile.TemporaryDirectory() as tmp:
         output_dir = Path(tmp)

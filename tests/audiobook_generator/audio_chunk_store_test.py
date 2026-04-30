@@ -132,6 +132,30 @@ def test_save_checked_chunk_creates_reusable_cache_entry():
         assert row["raw_transcription"] == "raw whisper text"
 
 
+def test_reference_check_suspicious_chunk_is_disputed_even_with_good_similarity():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = AudioChunkStore(str(Path(tmp) / "test.db"))
+
+        store.save_checked_chunk(
+            "0001_Test",
+            "hash_reference_suspicious",
+            "Исходный текст.",
+            "Исходный текст.",
+            0.99,
+            raw_transcription="Исходный текст.",
+            reference_check_score=1.25,
+            reference_check_threshold=0.85,
+            reference_check_status="suspicious",
+            reference_check_payload='{"score":1.25}',
+        )
+
+        rows = store.get_disputed_chunks("0001_Test", threshold=0.70)
+        assert len(rows) == 1
+        assert rows[0]["sentence_hash"] == "hash_reference_suspicious"
+        assert rows[0]["reference_check_score"] == 1.25
+        assert rows[0]["reference_check_status"] == "suspicious"
+
+
 def test_save_disputed_chunk_stores_raw_transcription_and_cache_lookup():
     with tempfile.TemporaryDirectory() as tmp:
         store = AudioChunkStore(str(Path(tmp) / "test.db"))

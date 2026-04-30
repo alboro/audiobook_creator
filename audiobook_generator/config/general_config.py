@@ -196,6 +196,11 @@ class GeneralConfig:
         self.audio_check_model = getattr(args, 'audio_check_model', None)
         self.audio_check_threshold = getattr(args, 'audio_check_threshold', None)
         self.audio_check_device = getattr(args, 'audio_check_device', None)
+        self.audio_reference_check_command = getattr(args, 'audio_reference_check_command', None)
+        self.audio_reference_check_threshold = getattr(args, 'audio_reference_check_threshold', None)
+        self.audio_reference_check_timeout = getattr(args, 'audio_reference_check_timeout', None)
+        self.audio_reference_check_cache_dir = getattr(args, 'audio_reference_check_cache_dir', None)
+        self.audio_reference_check_stress = getattr(args, 'audio_reference_check_stress', None)
 
         # Dynamic per-normalizer model overrides: normalize_{step}_model
         # These are set by merge_ini_into_args for any key in INI that matches the pattern.

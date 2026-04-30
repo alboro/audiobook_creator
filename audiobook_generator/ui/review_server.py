@@ -575,6 +575,10 @@ async def get_disputed(dir: str, chapter_key: str, threshold: float = 0.70):
             "original_text": r["original_text"],
             "transcription": r["transcription"],
             "similarity": r["similarity"],
+            "reference_check_score": r["reference_check_score"],
+            "reference_check_threshold": r["reference_check_threshold"],
+            "reference_check_status": r["reference_check_status"],
+            "reference_check_payload": r["reference_check_payload"],
             "checked_at": r["checked_at"],
             "status": r["status"],
             "resolved": False,  # resolved rows are excluded by the dynamic query

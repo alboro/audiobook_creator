@@ -75,6 +75,10 @@ class AudioChunkStore:
                     transcription TEXT,
                     raw_transcription TEXT,
                     similarity    REAL,
+                    reference_check_score REAL,
+                    reference_check_threshold REAL,
+                    reference_check_status TEXT,
+                    reference_check_payload TEXT,
                     checked_at    TEXT,
                     status        TEXT,
                     PRIMARY KEY (chapter_key, sentence_hash)
@@ -93,6 +97,18 @@ class AudioChunkStore:
                     ON chunk_auto_deletions (sentence_hash);
                 """
             )
+            conn.commit()
+
+            chunk_cols = {row[1] for row in conn.execute("PRAGMA table_info(chunk_cache)")}
+            chunk_migrations = {
+                "reference_check_score": "ALTER TABLE chunk_cache ADD COLUMN reference_check_score REAL",
+                "reference_check_threshold": "ALTER TABLE chunk_cache ADD COLUMN reference_check_threshold REAL",
+                "reference_check_status": "ALTER TABLE chunk_cache ADD COLUMN reference_check_status TEXT",
+                "reference_check_payload": "ALTER TABLE chunk_cache ADD COLUMN reference_check_payload TEXT",
+            }
+            for col_name, statement in chunk_migrations.items():
+                if col_name not in chunk_cols:
+                    conn.execute(statement)
             conn.commit()
 
             # ── Migration: drop legacy columns (version_index, run_id) ──────────
@@ -170,6 +186,10 @@ class AudioChunkStore:
         raw_transcription: str | None,
         similarity: float | None,
         status: str,
+        reference_check_score: float | None = None,
+        reference_check_threshold: float | None = None,
+        reference_check_status: str | None = None,
+        reference_check_payload: str | None = None,
         keep_resolved: bool = False,
     ) -> None:
         now = _utc_now()
@@ -184,17 +204,40 @@ class AudioChunkStore:
             conn.execute(
                 f"""
                 INSERT INTO chunk_cache
-                    (chapter_key, sentence_hash, original_text, transcription, raw_transcription, similarity, checked_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (
+                        chapter_key, sentence_hash, original_text,
+                        transcription, raw_transcription, similarity,
+                        reference_check_score, reference_check_threshold,
+                        reference_check_status, reference_check_payload,
+                        checked_at, status
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chapter_key, sentence_hash) DO UPDATE SET
                     original_text = excluded.original_text,
                     transcription = excluded.transcription,
                     raw_transcription = excluded.raw_transcription,
                     similarity = excluded.similarity,
+                    reference_check_score = excluded.reference_check_score,
+                    reference_check_threshold = excluded.reference_check_threshold,
+                    reference_check_status = excluded.reference_check_status,
+                    reference_check_payload = excluded.reference_check_payload,
                     checked_at = excluded.checked_at,
                     status = {status_update}
                 """,
-                (chapter_key, sentence_hash, original_text, transcription, raw_transcription, similarity, now, status),
+                (
+                    chapter_key,
+                    sentence_hash,
+                    original_text,
+                    transcription,
+                    raw_transcription,
+                    similarity,
+                    reference_check_score,
+                    reference_check_threshold,
+                    reference_check_status,
+                    reference_check_payload,
+                    now,
+                    status,
+                ),
             )
             conn.commit()
 
@@ -268,6 +311,10 @@ class AudioChunkStore:
         transcription: str,
         similarity: float,
         raw_transcription: str | None = None,
+        reference_check_score: float | None = None,
+        reference_check_threshold: float | None = None,
+        reference_check_status: str | None = None,
+        reference_check_payload: str | None = None,
     ) -> None:
         """Save a checked chunk (transcription complete, similarity stored).
 
@@ -283,6 +330,10 @@ class AudioChunkStore:
             transcription=transcription,
             raw_transcription=raw_transcription,
             similarity=similarity,
+            reference_check_score=reference_check_score,
+            reference_check_threshold=reference_check_threshold,
+            reference_check_status=reference_check_status,
+            reference_check_payload=reference_check_payload,
             status=STATUS_CHECKED,
             keep_resolved=True,  # never overwrite a user-approved decision
         )
@@ -295,6 +346,10 @@ class AudioChunkStore:
         transcription: str,
         similarity: float,
         raw_transcription: str | None = None,
+        reference_check_score: float | None = None,
+        reference_check_threshold: float | None = None,
+        reference_check_status: str | None = None,
+        reference_check_payload: str | None = None,
     ) -> None:
         """Backwards-compatible wrapper — delegates to save_checked_chunk.
 
@@ -309,6 +364,10 @@ class AudioChunkStore:
             transcription=transcription,
             raw_transcription=raw_transcription,
             similarity=similarity,
+            reference_check_score=reference_check_score,
+            reference_check_threshold=reference_check_threshold,
+            reference_check_status=reference_check_status,
+            reference_check_payload=reference_check_payload,
             status=STATUS_CHECKED,
             keep_resolved=True,
         )
@@ -377,7 +436,7 @@ class AudioChunkStore:
         )
 
     def get_disputed_chunks(self, chapter_key: str, threshold: float = 0.70) -> List[sqlite3.Row]:
-        """Return chunks whose similarity falls below *threshold* and are not resolved.
+        """Return chunks whose similarity falls below *threshold* or reference check is suspicious.
 
         The disputed/ok decision is dynamic: no static ``disputed`` status is
         stored.  Pass ``threshold`` matching the current ``audio_check_threshold``
@@ -391,8 +450,10 @@ class AudioChunkStore:
                 """
                 SELECT * FROM chunk_cache
                 WHERE chapter_key = ?
-                  AND similarity IS NOT NULL
-                  AND similarity < ?
+                  AND (
+                    (similarity IS NOT NULL AND similarity < ?)
+                    OR reference_check_status = 'suspicious'
+                  )
                   AND (status IS NULL OR status != ?)
                 ORDER BY similarity ASC
                 """,
@@ -465,8 +526,10 @@ class AudioChunkStore:
                 """
                 SELECT chapter_key, sentence_hash, similarity, original_text
                 FROM chunk_cache
-                WHERE similarity IS NOT NULL
-                  AND similarity < ?
+                WHERE (
+                    (similarity IS NOT NULL AND similarity < ?)
+                    OR reference_check_status = 'suspicious'
+                  )
                   AND (status IS NULL OR status != ?)
                 ORDER BY chapter_key, similarity ASC
                 """,
