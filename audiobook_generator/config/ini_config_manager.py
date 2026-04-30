@@ -127,6 +127,7 @@ FIELD_SECTIONS: Dict[str, str] = {
     "normalize_stress_ambiguity_file": "normalize",
     "normalize_stress_ambiguity_system_prompt": "normalize",
     "normalize_safe_split_system_prompt": "normalize",
+    "normalize_reasoning_effort": "normalize",
     "normalize_tsnorm_stress_yo": "normalize",
     "normalize_tsnorm_stress_monosyllabic": "normalize",
     "normalize_tsnorm_min_word_length": "normalize",

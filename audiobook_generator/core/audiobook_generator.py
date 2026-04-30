@@ -359,14 +359,40 @@ class AudiobookGenerator:
         return self._load_cover_override() or default_cover
 
     def _apply_chapter_title_overrides(self, chapter_titles: list[str]) -> list[str]:
-        """Apply optional per-line chapter title overrides for final m4b chapter markers."""
-        titles_path = getattr(self.config, "chapter_titles_file", None)
-        if not titles_path:
-            return chapter_titles
+        """Apply optional per-line chapter title overrides for final m4b chapter markers.
 
-        path = Path(str(titles_path)).expanduser()
-        if not path.is_file():
-            logger.warning("Configured chapter_titles_file does not exist: %s", path)
+        Resolution order (first that points to an existing file wins):
+          1. ``chapter_titles_file`` from config (explicit override).
+          2. ``chapter_titles.txt`` inside ``prepared_text_folder`` if set.
+          3. ``chapter_titles.txt`` inside the latest run folder discovered via
+             ``find_latest_run_folder(output_folder)``.
+        """
+        from audiobook_generator.utils.existing_chapters_loader import find_latest_run_folder
+
+        titles_path: str | None = getattr(self.config, "chapter_titles_file", None)
+        path: Path | None = Path(str(titles_path)).expanduser() if titles_path else None
+
+        if path is None or not path.is_file():
+            # Try prepared_text_folder first
+            prepared = getattr(self.config, "prepared_text_folder", None)
+            if prepared:
+                candidate = Path(str(prepared)) / "chapter_titles.txt"
+                if candidate.is_file():
+                    path = candidate
+
+        if path is None or not path.is_file():
+            # Fall back to latest run folder
+            output_folder = getattr(self.config, "output_folder", None)
+            if output_folder:
+                run_folder = find_latest_run_folder(output_folder)
+                if run_folder:
+                    candidate = run_folder / "chapter_titles.txt"
+                    if candidate.is_file():
+                        path = candidate
+
+        if path is None or not path.is_file():
+            if titles_path:
+                logger.warning("Configured chapter_titles_file does not exist: %s", titles_path)
             return chapter_titles
 
         try:

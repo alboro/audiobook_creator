@@ -155,6 +155,9 @@ class GeneralConfig:
         self.normalize_safe_split_system_prompt = getattr(
             args, 'normalize_safe_split_system_prompt', None
         )
+        self.normalize_reasoning_effort = getattr(
+            args, 'normalize_reasoning_effort', None
+        )
 
         # TTS provider: Azure & Edge TTS specific arguments
         self.break_duration = getattr(args, 'break_duration', None)

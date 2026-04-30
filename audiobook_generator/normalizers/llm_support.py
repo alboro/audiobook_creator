@@ -6,14 +6,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+import openai
 from openai import OpenAI
 
 from audiobook_generator.config.general_config import GeneralConfig
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SYSTEM_PROMPT = """You normalize ebook text for text-to-speech.
 
@@ -40,6 +45,7 @@ Rules:
 {"selections":[{"id":"item-1","option_id":"option-id","custom_text":"","cacheable":false,"reason":""}]}"""
 CHOICE_PROMPT_MARGIN_CHARS = 400
 CHOICE_CACHE_VERSION = 1
+RATE_LIMIT_RETRY_INTERVAL_S = 180  # 3 minutes between rate-limit retries
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,7 @@ class NormalizerLLMSettings:
     system_prompt: str
     user_prompt_template: str
     choice_cache_path: str
+    reasoning_effort: str | None = None  # "low" | "medium" | "high"
 
 
 class NormalizerLLMChoiceCache:
@@ -178,15 +185,33 @@ class NormalizerLLM:
         temperature: float = 0,
     ) -> str:
         self.ensure_available()
-        response = self.client.chat.completions.create(
-            model=model or self.settings.model,
-            temperature=temperature,
-            messages=[
-                {"role": "system", "content": system_prompt or self.settings.system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        return (response.choices[0].message.content or "").strip()
+        effective_model = model or self.settings.model
+        extra_kwargs: dict = {}
+        if self.settings.reasoning_effort:
+            extra_kwargs["reasoning_effort"] = self.settings.reasoning_effort
+
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                response = self.client.chat.completions.create(
+                    model=effective_model,
+                    temperature=temperature,
+                    messages=[
+                        {"role": "system", "content": system_prompt or self.settings.system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    **extra_kwargs,
+                )
+                return (response.choices[0].message.content or "").strip()
+            except openai.RateLimitError as exc:
+                logger.warning(
+                    "LLM rate limit reached (attempt %d): %s — sleeping %d s before retry.",
+                    attempt,
+                    exc,
+                    RATE_LIMIT_RETRY_INTERVAL_S,
+                )
+                time.sleep(RATE_LIMIT_RETRY_INTERVAL_S)
 
     def _build_client(self):
         if self.settings.provider != "openai":
@@ -475,6 +500,7 @@ def resolve_normalizer_llm_settings(config: GeneralConfig) -> NormalizerLLMSetti
         system_prompt=system_prompt,
         user_prompt_template=user_prompt_template,
         choice_cache_path=str(_resolve_choice_cache_path(config)),
+        reasoning_effort=getattr(config, "normalize_reasoning_effort", None) or None,
     )
 
 
