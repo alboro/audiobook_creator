@@ -231,6 +231,9 @@ class AudioChecker:
         self._reference_check_stress = (
             getattr(config, "audio_reference_check_stress", None) if config else None
         ) or "preserve"
+        self._prepared_text_folder = (
+            getattr(config, "prepared_text_folder", None) if config else None
+        )
         self._ffmpeg_path = getattr(config, "ffmpeg_path", None) if config else None
         # Pre-compare normalizer: expand abbreviations/numbers before similarity scoring.
         # Built from config language if available, otherwise use default "ru".
@@ -259,6 +262,18 @@ class AudioChecker:
 
     def _reference_check_enabled(self) -> bool:
         return bool(self._reference_check_command)
+
+    def _select_text_run_folder(self) -> Optional[Path]:
+        """Select the text run to use as the source of truth for audio_check."""
+        if self._prepared_text_folder:
+            folder = Path(self._prepared_text_folder)
+            if not folder.is_absolute():
+                folder = self.output_folder / folder
+            return folder if folder.exists() else None
+
+        from audiobook_generator.utils.existing_chapters_loader import find_latest_run_folder
+
+        return find_latest_run_folder(self.output_folder)
 
     def _reference_check_command_parts(self) -> list[str]:
         command = str(self._reference_check_command or "").strip()
@@ -487,13 +502,10 @@ class AudioChecker:
         counters = {"checked": 0, "disputed": 0, "skipped": 0}
 
         # --- Text-first approach -------------------------------------------
-        from audiobook_generator.utils.existing_chapters_loader import (
-            find_latest_run_folder,
-            load_chapters_from_run_folder,
-        )
+        from audiobook_generator.utils.existing_chapters_loader import load_chapters_from_run_folder
         from audiobook_generator.utils.existing_chapters_loader import split_text_into_chunks
 
-        run_folder = find_latest_run_folder(self.output_folder)
+        run_folder = self._select_text_run_folder()
         if run_folder:
             chapters = load_chapters_from_run_folder(run_folder)
             logger.info(

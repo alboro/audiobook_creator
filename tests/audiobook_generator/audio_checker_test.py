@@ -5,6 +5,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from audiobook_generator.core.audio_checker import (
     AudioChecker,
@@ -114,6 +115,23 @@ def test_check_one_file_runs_reference_check_when_transcription_is_cached():
         assert counters["checked"] == 1
         assert counters["disputed"] == 0
         assert counters["reference_checked"] == 1
+
+
+def test_audio_check_prepared_text_folder_overrides_auto_run_selection():
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        run_009 = output_dir / "text" / "009"
+        run_010 = output_dir / "text" / "010"
+        run_009.mkdir(parents=True)
+        run_010.mkdir(parents=True)
+        (run_009 / "0001_Title.txt").write_text("Text.", encoding="utf-8")
+        (run_010 / "0001_Title.txt").write_text("Text.", encoding="utf-8")
+        (output_dir / "wav" / "chunks" / "0001_Title").mkdir(parents=True)
+
+        config = SimpleNamespace(prepared_text_folder=str(run_010))
+        checker = AudioChecker(output_folder=output_dir, config=config)
+
+        assert checker._select_text_run_folder() == run_010
 
 
 def test_check_one_file_persists_checked_chunk_cache_after_successful_run():

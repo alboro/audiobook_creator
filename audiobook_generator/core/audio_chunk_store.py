@@ -37,6 +37,13 @@ def _utc_now() -> str:
 class AudioChunkStore:
     """Tracks per-sentence text version history in a WAL-mode SQLite database."""
 
+    _CHUNK_CACHE_REFERENCE_COLUMNS = {
+        "reference_check_score": "REAL",
+        "reference_check_threshold": "REAL",
+        "reference_check_status": "TEXT",
+        "reference_check_payload": "TEXT",
+    }
+
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,17 +106,7 @@ class AudioChunkStore:
             )
             conn.commit()
 
-            chunk_cols = {row[1] for row in conn.execute("PRAGMA table_info(chunk_cache)")}
-            chunk_migrations = {
-                "reference_check_score": "ALTER TABLE chunk_cache ADD COLUMN reference_check_score REAL",
-                "reference_check_threshold": "ALTER TABLE chunk_cache ADD COLUMN reference_check_threshold REAL",
-                "reference_check_status": "ALTER TABLE chunk_cache ADD COLUMN reference_check_status TEXT",
-                "reference_check_payload": "ALTER TABLE chunk_cache ADD COLUMN reference_check_payload TEXT",
-            }
-            for col_name, statement in chunk_migrations.items():
-                if col_name not in chunk_cols:
-                    conn.execute(statement)
-            conn.commit()
+            self._ensure_chunk_cache_reference_columns(conn)
 
             # ── Migration: drop legacy columns (version_index, run_id) ──────────
             cols = {row[1] for row in conn.execute("PRAGMA table_info(sentence_text_versions)")}
@@ -176,6 +173,21 @@ class AudioChunkStore:
                 )
                 conn.commit()
 
+    def _ensure_chunk_cache_reference_columns(self, conn) -> None:
+        """Add reference-check columns to legacy chunk_cache tables if needed."""
+        chunk_cols = {row[1] for row in conn.execute("PRAGMA table_info(chunk_cache)")}
+        added: list[str] = []
+        for col_name, col_type in self._CHUNK_CACHE_REFERENCE_COLUMNS.items():
+            if col_name not in chunk_cols:
+                conn.execute(f"ALTER TABLE chunk_cache ADD COLUMN {col_name} {col_type}")
+                added.append(col_name)
+        if added:
+            conn.commit()
+            logger.info(
+                "Migrated chunk_cache reference-check columns: %s",
+                ", ".join(added),
+            )
+
     def _upsert_chunk_cache(
         self,
         *,
@@ -194,6 +206,7 @@ class AudioChunkStore:
     ) -> None:
         now = _utc_now()
         with closing(self._connect()) as conn:
+            self._ensure_chunk_cache_reference_columns(conn)
             if keep_resolved:
                 status_update = (
                     f"CASE WHEN chunk_cache.status = '{STATUS_RESOLVED}' "
