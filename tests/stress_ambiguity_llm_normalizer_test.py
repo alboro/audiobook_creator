@@ -522,6 +522,199 @@ class TestStressAmbiguityWithRealDb(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Suite 3: «самому» — ambiguous stress (са́мому vs самому́)
+# ---------------------------------------------------------------------------
+
+# Expected spoken forms for «самому»
+SAMOMU_SAMYJ = f"са{COMBINING_ACUTE}мому"   # са́мому — от «самый» (прилагательное/местоимение)
+SAMOMU_SAM   = f"самому{COMBINING_ACUTE}"   # самому́ — от «сам»  (местоимение)
+
+# Full sentence from the user's task
+SAMOMU_SENTENCE = (
+    "Он ничего не объясняет разуму, ничего не проясняет воображению, "
+    "а только оставляет читателя самому отыскивать какой-нибудь смысл, "
+    "если он сможет."
+)
+
+
+class TestStressAmbiguitySamomu(unittest.TestCase):
+    """
+    «самому» имеет два ударения в tsnorm:
+      са́мому  — от «самый» (прилагательное/местоимение)
+      самому́  — от «сам»   (местоимение, дательный падеж)
+
+    В предложении «…оставляет читателя самому отыскивать…»
+    правильный вариант — самому́ (сам ~ himself), но нас интересует
+    именно то, будет ли слово предложено LLM на выбор.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        db = ensure_pronunciation_lexicon_db()
+        config = make_config(normalize_pronunciation_lexicon_db=str(db.path))
+        cls.normalizer = StressAmbiguityLLMNormalizer(config)
+
+    # ------------------------------------------------------------------
+    # 1. БД содержит оба варианта
+    # ------------------------------------------------------------------
+
+    def test_real_db_samomu_is_ambiguous(self):
+        db = ensure_pronunciation_lexicon_db()
+        entries = db.lookup_ambiguous_entries("самому")
+        self.assertGreaterEqual(
+            len(entries), 2,
+            "В реальной БД «самому» должна иметь ≥2 записи с разными произношениями",
+        )
+
+    def test_real_db_samomu_has_samyj_variant(self):
+        db = ensure_pronunciation_lexicon_db()
+        forms = db.lookup_spoken_forms("самому", only_ambiguous=True)
+        self.assertIn(
+            SAMOMU_SAMYJ, forms,
+            f"Вариант са́мому (от «самый») не найден в БД. Формы: {forms}",
+        )
+
+    def test_real_db_samomu_has_sam_variant(self):
+        db = ensure_pronunciation_lexicon_db()
+        forms = db.lookup_spoken_forms("самому", only_ambiguous=True)
+        self.assertIn(
+            SAMOMU_SAM, forms,
+            f"Вариант самому́ (от «сам») не найден в БД. Формы: {forms}",
+        )
+
+    # ------------------------------------------------------------------
+    # 2. Нормалайзер обнаруживает «самому» как кандидата
+    # ------------------------------------------------------------------
+
+    def test_samomu_detected_as_candidate_in_full_sentence(self):
+        candidates = self.normalizer._collect_candidates(SAMOMU_SENTENCE)
+        source_texts = [c.source_text.lower() for c in candidates]
+        self.assertIn(
+            "самому",
+            source_texts,
+            f"«самому» должно быть обнаружено как неоднозначный кандидат. "
+            f"Найдено: {source_texts}",
+        )
+
+    def test_samomu_candidate_options_contain_samyj_variant(self):
+        candidates = self.normalizer._collect_candidates(SAMOMU_SENTENCE)
+        samomu = next((c for c in candidates if c.source_text.lower() == "самому"), None)
+        self.assertIsNotNone(samomu, "Кандидат «самому» не найден")
+        option_texts = {opt.text for opt in samomu.options}
+        self.assertIn(
+            SAMOMU_SAMYJ, option_texts,
+            f"Вариант са́мому не в опциях: {option_texts}",
+        )
+
+    def test_samomu_candidate_options_contain_sam_variant(self):
+        candidates = self.normalizer._collect_candidates(SAMOMU_SENTENCE)
+        samomu = next((c for c in candidates if c.source_text.lower() == "самому"), None)
+        self.assertIsNotNone(samomu, "Кандидат «самому» не найден")
+        option_texts = {opt.text for opt in samomu.options}
+        self.assertIn(
+            SAMOMU_SAM, option_texts,
+            f"Вариант самому́ не в опциях: {option_texts}",
+        )
+
+    def test_samomu_candidate_has_at_least_three_options(self):
+        # options включают «original» + ≥2 варианта ударения
+        candidates = self.normalizer._collect_candidates(SAMOMU_SENTENCE)
+        samomu = next((c for c in candidates if c.source_text.lower() == "самому"), None)
+        self.assertIsNotNone(samomu, "Кандидат «самому» не найден")
+        self.assertGreaterEqual(
+            len(samomu.options), 3,
+            f"Ожидалось ≥3 опции (original + 2 варианта): {samomu.options}",
+        )
+
+    # ------------------------------------------------------------------
+    # 3. plan_processing_units: слово попадает в пакет для LLM
+    # ------------------------------------------------------------------
+
+    def test_samomu_included_in_llm_plan(self):
+        units = self.normalizer.plan_processing_units(SAMOMU_SENTENCE)
+        self.assertGreaterEqual(len(units), 1)
+        all_source_texts = []
+        for unit in units:
+            payload = json.loads(unit)
+            all_source_texts.extend(item["source_text"].lower() for item in payload["items"])
+        self.assertIn(
+            "самому", all_source_texts,
+            f"«самому» не попало в пакет LLM. Найдено: {all_source_texts}",
+        )
+
+    def test_samomu_llm_plan_has_both_stress_variants(self):
+        units = self.normalizer.plan_processing_units(SAMOMU_SENTENCE)
+        option_texts: list[str] = []
+        for unit in units:
+            payload = json.loads(unit)
+            for item in payload["items"]:
+                if item["source_text"].lower() == "самому":
+                    option_texts.extend(opt["text"] for opt in item["options"])
+        self.assertIn(SAMOMU_SAMYJ, option_texts, f"са́мому не в опциях LLM-пакета: {option_texts}")
+        self.assertIn(SAMOMU_SAM,   option_texts, f"самому́ не в опциях LLM-пакета: {option_texts}")
+
+    # ------------------------------------------------------------------
+    # 4. merge: применение выбранного LLM варианта
+    # ------------------------------------------------------------------
+
+    def _variant_option_id_for_samomu(self, spoken_form: str) -> str:
+        units = self.normalizer.plan_processing_units(SAMOMU_SENTENCE)
+        for unit in units:
+            payload = json.loads(unit)
+            for item in payload["items"]:
+                if item["source_text"].lower() == "самому":
+                    for opt in item["options"]:
+                        if opt["text"] == spoken_form:
+                            return opt["id"]
+        raise AssertionError(f"Option {spoken_form!r} not found for «самому»")
+
+    def _plan_and_apply_samomu(self, override_spoken_form: str | None = None) -> str:
+        units = self.normalizer.plan_processing_units(SAMOMU_SENTENCE)
+        opt_id_override = (
+            self._variant_option_id_for_samomu(override_spoken_form)
+            if override_spoken_form else None
+        )
+        fake_processed: list[str] = []
+        for unit in units:
+            payload = json.loads(unit)
+            selections = []
+            for item in payload["items"]:
+                if opt_id_override and item["source_text"].lower() == "самому":
+                    opt_id = opt_id_override
+                else:
+                    opt_id = "original"
+                selections.append({
+                    "id": item["id"],
+                    "option_id": opt_id,
+                    "custom_text": "",
+                    "cacheable": False,
+                    "reason": "test",
+                })
+            fake_processed.append(json.dumps({"selections": selections}))
+        return self.normalizer.merge_processed_units(fake_processed)
+
+    def test_merge_applies_sam_stress_when_chosen(self):
+        """LLM выбрал самому́ → в тексте должно стоять самому́."""
+        result = self._plan_and_apply_samomu(SAMOMU_SAM)
+        self.assertIn(
+            SAMOMU_SAM, result,
+            f"Ожидалось {SAMOMU_SAM!r} в результате, получили: {result!r}",
+        )
+
+    def test_merge_applies_samyj_stress_when_chosen(self):
+        """LLM выбрал са́мому → в тексте должно стоять са́мому."""
+        result = self._plan_and_apply_samomu(SAMOMU_SAMYJ)
+        self.assertIn(
+            SAMOMU_SAMYJ, result,
+            f"Ожидалось {SAMOMU_SAMYJ!r} в результате, получили: {result!r}",
+        )
+
+    def test_merge_leaves_text_unchanged_when_original_selected(self):
+        result = self._plan_and_apply_samomu(override_spoken_form=None)
+        self.assertEqual(result, SAMOMU_SENTENCE)
+
+
 if __name__ == "__main__":
     unittest.main()
 

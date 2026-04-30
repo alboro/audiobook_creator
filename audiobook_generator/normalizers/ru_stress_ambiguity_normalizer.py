@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from audiobook_generator.config.general_config import GeneralConfig
 from audiobook_generator.normalizers.base_normalizer import BaseNormalizer
 from audiobook_generator.normalizers.llm_support import (
-    DEFAULT_CHOICE_SYSTEM_PROMPT,
     NormalizerLLMChoiceItem,
     NormalizerLLMChoiceOption,
     NormalizerLLMChoiceSelection,
@@ -30,20 +29,24 @@ from audiobook_generator.normalizers.ru_text_utils import (
 logger = logging.getLogger(__name__)
 
 AMBIGUOUS_WORD_PATTERN = re.compile(rf"[А-Яа-яЁё{COMBINING_ACUTE}-]+")
+_RUSSIAN_VOWELS = frozenset("аеёиоуыэюяАЕЁИОУЫЭЮЯ")
 
-_DEFAULT_STRESS_AMBIGUITY_EXTRA = """
 
-Additional rules for this task:
-- The target language is Russian text-to-speech.
-- Focus only on ambiguous Russian word stress or pronunciation inside the highlighted source_text.
-- The provided options come from a pronunciation lexicon and represent valid spoken variants for the same written word form.
-- Choose the option that best matches the local sentence context.
-- Prefer adding a stress mark only when it genuinely helps the Russian TTS model avoid the wrong reading.
-- Leave the original option if the context is insufficient or the pronunciation is not clearly determined.
-- Set cacheable to true only if the best choice is stable for the same source_text regardless of wider context.
-- Do not rewrite surrounding context. Only choose among the provided options for the highlighted source_text unless a clearly better custom_text is necessary."""
+def _count_vowels(word: str) -> int:
+    """Return the number of vowel characters (i.e. syllables) in the word."""
+    return sum(1 for ch in word if ch in _RUSSIAN_VOWELS)
 
-STRESS_AMBIGUITY_CHOICE_SYSTEM_PROMPT = DEFAULT_CHOICE_SYSTEM_PROMPT + _DEFAULT_STRESS_AMBIGUITY_EXTRA
+STRESS_AMBIGUITY_CHOICE_SYSTEM_PROMPT = """Ты определяешь правильное ударение для слов русского текста, подготовленного для синтеза речи (TTS).
+
+Для каждого элемента: опираясь на контекст предложения и граммемы из поля hint, выбери вариант произношения, который точно соответствует синтаксической роли слова в этом предложении.
+
+Правила:
+- Выбирай тот вариант, граммемы которого соответствуют роли слова в предложении из поля context.
+- Если контекст недостаточен для однозначного выбора — возвращай original.
+- Если ни один из предложенных вариантов не подходит и ты уверен в лучшем — укажи custom_text с корректным ударением.
+- Не изменяй контекст и соседние слова.
+- Возвращай только JSON точно в такой форме:
+{"selections":[{"id":"item-1","option_id":"option-id","custom_text":"","cacheable":false,"reason":"кратко"}]}"""
 
 
 def _get_stress_ambiguity_prompt(config) -> str:
@@ -70,7 +73,7 @@ class StressAmbiguityCandidate:
             source_text=self.source_text,
             context=self.context,
             options=self.options,
-            note="Choose the stress or pronunciation variant that best fits this sentence.",
+            note="Выбери вариант ударения, наиболее соответствующий роли слова в предложении.",
         )
 
 
@@ -79,11 +82,11 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
     STEP_VERSION = 3
 
     def __init__(self, config: GeneralConfig):
-        self.lexicon_db = (
-            ensure_pronunciation_lexicon_db(config.normalize_pronunciation_lexicon_db)
-            if is_russian_language(config.language) and config.normalize_pronunciation_lexicon_db
-            else None
-        )
+        if is_russian_language(config.language):
+            db_path = getattr(config, "normalize_pronunciation_lexicon_db", None) or None
+            self.lexicon_db = ensure_pronunciation_lexicon_db(db_path)
+        else:
+            self.lexicon_db = None
         self._lexicon_entry_cache: dict[str, tuple[PronunciationLexiconEntry, ...]] = {}
         self._planned_text = ""
         self._planned_candidates: dict[str, StressAmbiguityCandidate] = {}
@@ -192,6 +195,7 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
             system_prompt=_get_stress_ambiguity_prompt(self.config),
             model=self.get_normalizer_model(),
             temperature=0,
+            use_cache=False,
         )
         normalized_selections = {
             item_id: self._coerce_selection(item_id, selection)
@@ -431,6 +435,11 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
 
             key = strip_combining_acute(source_text).lower()
 
+            # Skip monosyllabic words — stress position is unambiguous (only one vowel)
+            if _count_vowels(key) <= 1:
+                logger.debug("Skipping monosyllabic word '%s'", source_text)
+                continue
+
             # Skip words that are known to be mispronounced when stressed
             if paradox_guard.is_paradox_word(key):
                 logger.debug("Stress paradox guard: skipping '%s'", source_text)
@@ -483,6 +492,13 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
             NormalizerLLMChoiceOption("original", source_text)
         ]
         seen_texts = {source_text}
+
+        # Build spoken_form → set of grammeme labels for LLM hints
+        form_to_grammemes: dict[str, list[str]] = {}
+        for entry in lexicon_entries:
+            if entry.spoken_form and entry.grammemes and entry.grammemes != "canonical":
+                form_to_grammemes.setdefault(entry.spoken_form, []).append(entry.grammemes)
+
         unique_spoken_forms = sorted(
             {
                 entry.spoken_form
@@ -496,10 +512,17 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
             )
             if not preserved or preserved in seen_texts:
                 continue
+
+            # Compose a compact grammatical hint for the LLM
+            grammeme_labels = form_to_grammemes.get(spoken_form, [])
+            unique_labels = list(dict.fromkeys(grammeme_labels))  # deduplicated, order-preserved
+            hint: str | None = "; ".join(unique_labels) if unique_labels else None
+
             options.append(
                 NormalizerLLMChoiceOption(
                     option_id=f"variant_{index}",
                     text=preserved,
+                    hint=hint,
                 )
             )
             seen_texts.add(preserved)
@@ -537,7 +560,11 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
                         "context": item.context,
                         "note": item.note or "",
                         "options": [
-                            {"id": option.option_id, "text": option.text}
+                            {
+                                "id": option.option_id,
+                                "text": option.text,
+                                **({"hint": option.hint} if option.hint else {}),
+                            }
                             for option in item.options
                         ],
                     }
@@ -563,6 +590,7 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
                         NormalizerLLMChoiceOption(
                             option_id=raw_option["id"],
                             text=raw_option["text"],
+                            hint=raw_option.get("hint") or None,
                         )
                         for raw_option in raw_item.get("options", [])
                     ),

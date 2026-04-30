@@ -74,6 +74,79 @@ def _resolve_audio_root(output_dir: str) -> Path:
     return Path(output_dir) / "wav"
 
 
+def _wav_duration(path: str) -> Optional[float]:
+    """Read WAV duration in seconds by parsing the RIFF/WAVE header directly.
+
+    Supports both PCM (format 1) and IEEE Float (format 3) WAV files,
+    unlike Python's standard ``wave`` module which only handles PCM.
+    """
+    import struct
+    try:
+        with open(path, 'rb') as f:
+            # RIFF header: "RIFF" <size> "WAVE"
+            riff_id = f.read(4)
+            if riff_id != b'RIFF':
+                return None
+            f.read(4)  # file size — skip
+            wave_id = f.read(4)
+            if wave_id != b'WAVE':
+                return None
+
+            sample_rate: Optional[int] = None
+            num_channels: Optional[int] = None
+            bits_per_sample: Optional[int] = None
+            data_size: Optional[int] = None
+
+            while True:
+                chunk_id = f.read(4)
+                if len(chunk_id) < 4:
+                    break
+                chunk_size_bytes = f.read(4)
+                if len(chunk_size_bytes) < 4:
+                    break
+                chunk_size = struct.unpack('<I', chunk_size_bytes)[0]
+
+                if chunk_id == b'fmt ':
+                    fmt_data = f.read(chunk_size)
+                    if len(fmt_data) < 16:
+                        return None
+                    # audio_format(2) num_channels(2) sample_rate(4) byte_rate(4) block_align(2) bits_per_sample(2)
+                    num_channels = struct.unpack_from('<H', fmt_data, 2)[0]
+                    sample_rate = struct.unpack_from('<I', fmt_data, 4)[0]
+                    bits_per_sample = struct.unpack_from('<H', fmt_data, 14)[0]
+                elif chunk_id == b'data':
+                    data_size = chunk_size
+                    break  # no need to read further
+                else:
+                    # Skip unknown chunk (pad to even byte boundary)
+                    f.seek(chunk_size + (chunk_size & 1), 1)
+
+            if sample_rate and num_channels and bits_per_sample and data_size is not None:
+                bytes_per_sample = bits_per_sample // 8
+                if bytes_per_sample > 0 and num_channels > 0 and sample_rate > 0:
+                    frames = data_size // (num_channels * bytes_per_sample)
+                    return frames / float(sample_rate)
+            return None
+    except Exception:
+        return None
+
+
+def _get_dur(h: str, path: Optional[str]) -> Optional[float]:
+    """Return cached WAV duration for *hash* h, computing from *path* if needed."""
+    cache = getattr(app.state, '_dur_cache', None)
+    if cache is None:
+        app.state._dur_cache = {}
+        cache = app.state._dur_cache
+    if h in cache:
+        return cache[h]
+    if path is None:
+        return None
+    dur = _wav_duration(path)
+    if dur is not None:
+        cache[h] = dur
+    return dur
+
+
 def _find_chunk_path(output_dir: str, chapter_key: str, s_hash: str) -> Optional[str]:
     chunks_dir = _resolve_audio_root(output_dir) / "chunks" / chapter_key
     if not chunks_dir.exists():
@@ -161,6 +234,7 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
     for i, (chunk, voice) in enumerate(pairs):
         h = _sentence_hash(chunk)
         audio_path = _find_chunk_path(dir, chapter_key, h)
+        dur = _get_dur(h, audio_path) if audio_path else None
         result.append({
             "idx": i,
             "text": chunk,
@@ -170,6 +244,8 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
             "voice": voice,
             # how many times this chunk was auto-deleted and re-synthesised (0 = never)
             "auto_retry_count": retry_counts.get(h, 0),
+            # WAV duration in seconds (null when audio not yet synthesised)
+            "duration_s": round(dur, 3) if dur is not None else None,
         })
     return result
 
@@ -181,6 +257,48 @@ async def get_audio(dir: str, chapter_key: str, hash: str):
     if not path:
         raise HTTPException(404, "Audio not found")
     return FileResponse(path, media_type="audio/wav")
+
+
+@app.get("/api/chapter_durations")
+async def get_chapter_durations(dir: str):
+    """Return total synthesised audio duration (seconds) for every chapter.
+
+    Used by the Review UI to compute book-global chunk timecodes.
+    Results are fast after the first call because WAV header reads are
+    cached in-memory by sentence hash.
+    """
+    output_path = Path(dir)
+    if not output_path.exists():
+        raise HTTPException(404, f"Directory not found: {dir}")
+
+    run_folder = find_latest_run_folder(str(output_path))
+    if not run_folder:
+        return []
+
+    chapters = load_chapters_from_run_folder(run_folder, audio_root=_resolve_audio_root(dir))
+    voice2 = _config_voice_name2()
+
+    result = []
+    for ch in chapters:
+        total = 0.0
+        if Path(ch.text_path).exists():
+            try:
+                text = Path(ch.text_path).read_text(encoding="utf-8")
+                pairs = split_sentences_with_voices(text, "ru", voice2=voice2)
+                for chunk_text, _ in pairs:
+                    h = _sentence_hash(chunk_text)
+                    audio_path = _find_chunk_path(dir, ch.chapter_key, h)
+                    dur = _get_dur(h, audio_path) if audio_path else None
+                    if dur is not None:
+                        total += dur
+            except Exception:
+                pass
+        result.append({
+            "key": ch.chapter_key,
+            "idx": ch.chapter_idx,
+            "total_s": round(total, 2),
+        })
+    return result
 
 
 @app.get("/api/history")

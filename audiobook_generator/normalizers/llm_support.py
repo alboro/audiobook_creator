@@ -46,6 +46,7 @@ CHOICE_CACHE_VERSION = 1
 class NormalizerLLMChoiceOption:
     option_id: str
     text: str
+    hint: str | None = None  # grammatical hint shown to LLM, e.g. "genitive singular"
 
 
 @dataclass(frozen=True)
@@ -257,7 +258,11 @@ class NormalizerLLMChoiceService:
                     "context": item.context,
                     "note": item.note or "",
                     "options": [
-                        {"id": option.option_id, "text": option.text}
+                        {
+                            "id": option.option_id,
+                            "text": option.text,
+                            **({} if not option.hint else {"hint": option.hint}),
+                        }
                         for option in item.options
                     ],
                 }
@@ -277,11 +282,15 @@ class NormalizerLLMChoiceService:
         system_prompt: str = DEFAULT_CHOICE_SYSTEM_PROMPT,
         model: str | None = None,
         temperature: float = 0,
+        use_cache: bool = True,
     ) -> dict[str, NormalizerLLMChoiceSelection]:
         if not items:
             return {}
 
-        cached, unresolved = self._resolve_cached(items, target_language=target_language, system_prompt=system_prompt)
+        if use_cache:
+            cached, unresolved = self._resolve_cached(items, target_language=target_language, system_prompt=system_prompt)
+        else:
+            cached, unresolved = {}, list(items)
         if not unresolved:
             return cached
 
@@ -304,7 +313,7 @@ class NormalizerLLMChoiceService:
                     source="fallback",
                 )
             resolved[item.item_id] = selection
-            if selection.cacheable:
+            if use_cache and selection.cacheable:
                 cache_key = self._make_cache_key(
                     item,
                     target_language=target_language,

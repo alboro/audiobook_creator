@@ -85,6 +85,8 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
 .ch-h2-overridden{color:#a6e3a1}
 .ch-h2-overridden:hover{color:#89b4fa}
 .chapter-title-input{flex:1;background:#252538;color:#cdd6f4;border:1px solid #89b4fa;border-radius:4px;padding:3px 8px;font-size:14px;font-weight:600;outline:none;min-width:0}
+.ctiming{font-size:9px;color:#585870;font-family:monospace;margin-left:6px;letter-spacing:.02em}
+.ctiming-pos{color:#45475a}
 </style>
 </head>
 <body x-data="reviewApp()" x-init="boot()">
@@ -190,6 +192,9 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
                 <template x-if="chunk.voice"><span class="voice-badge" x-text="'🎙 ' + chunk.voice"></span></template>
                 <template x-if="chunk.has_audio">
                   <a class="chash" :href="_url(chunk.hash)" download x-text="chunk.hash.slice(0,8)"></a>
+                </template>
+                <template x-if="chunk.has_audio && chunkTimingStr(chunk, i)">
+                  <span class="ctiming" x-text="chunkTimingStr(chunk, i)"></span>
                 </template>
                 <template x-if="chunk.has_audio && chunk.auto_retry_count > 0">
                   <span class="retry-badge" :title="'re-synthesised ' + chunk.auto_retry_count + ' time(s)'" x-text="'↻' + chunk.auto_retry_count"></span>
@@ -345,6 +350,9 @@ function reviewApp() {
     chapterTitleText: '',
     chapterTitleOverrides: [],   // 0-based array: overrides[chapter_idx - 1]
     chapterTitlesPath: null,
+    // timing
+    chapterOffsets: {},      // chapter_key → book-global start offset (s)
+    chunkChapOffsets: [],    // per-chunk cumulative chapter offset (s), indexed by chunk position
 
     /* ── Boot / persistence ── */
     async boot() {
@@ -449,6 +457,9 @@ function reviewApp() {
 
         // Reload chapter title overrides for the (potentially new) output dir
         this._loadChapterTitleOverrides();
+        // Reload per-chapter durations (for book-global timecodes in chunk rows).
+        // Fire-and-forget — UI works without it, timing badges fill in when ready.
+        this._loadChapterTotals().catch(() => {});
 
         // Restore saved chapter
         const savedKey = localStorage.getItem('rev_chapter_key');
@@ -482,6 +493,9 @@ function reviewApp() {
         if (!r.ok) throw new Error(await r.text());
         this.chunks = await r.json();
         this.st(this.chunks.length + ' chunks');
+
+        // Pre-compute cumulative chapter offsets for timing badges (O(n), done once).
+        this._computeChunkOffsets();
 
         // Load disputed chunks in the background
         this._loadDisputed(ch.key).catch(() => {});
@@ -851,6 +865,64 @@ function reviewApp() {
       } catch (e) {
         this.st('Error: ' + e.message, true);
       }
+    },
+
+    /* ── Timing helpers ── */
+
+    // Pre-compute cumulative duration offsets within the current chapter (O(n)).
+    // Must be called every time this.chunks is freshly loaded or modified.
+    _computeChunkOffsets() {
+      let cum = 0;
+      this.chunkChapOffsets = this.chunks.map(c => {
+        const off = cum;
+        cum += (c.duration_s || 0);
+        return off;
+      });
+    },
+
+    // Fetch total durations for all chapters and build book-global offset map.
+    async _loadChapterTotals() {
+      try {
+        const r = await fetch('/api/chapter_durations?dir=' + encodeURIComponent(this.outputDir));
+        if (!r.ok) return;
+        const data = await r.json();
+        const offsets = {};
+        let running = 0;
+        for (const ch of data) {
+          offsets[ch.key] = running;
+          running += (ch.total_s || 0);
+        }
+        this.chapterOffsets = offsets;
+      } catch(_) {}
+    },
+
+    _fmtTime(secs) {
+      if (secs == null || secs < 0) return '0:00';
+      const s = Math.floor(secs);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const ss = s % 60;
+      const mm = String(m).padStart(2, '0');
+      const sss = String(ss).padStart(2, '0');
+      return h > 0 ? h + ':' + mm + ':' + sss : m + ':' + sss;
+    },
+
+    _fmtDur(secs) {
+      if (secs == null) return '';
+      if (secs < 60) return secs.toFixed(1) + 's';
+      return this._fmtTime(secs);
+    },
+
+    // Returns timing string for a chunk, e.g. "2.4s · ch 1:23 · Σ 12:34"
+    chunkTimingStr(chunk, i) {
+      const dur = chunk.duration_s;
+      if (dur == null) return '';
+      const chapOff = (this.chunkChapOffsets && i < this.chunkChapOffsets.length)
+        ? this.chunkChapOffsets[i] : 0;
+      const bookOff = (this.chapterOffsets[this.currentChapter?.key] ?? 0) + chapOff;
+      const parts = [this._fmtDur(dur), 'ch ' + this._fmtTime(chapOff)];
+      if (bookOff > 0 || chapOff > 0) parts.push('Σ ' + this._fmtTime(bookOff));
+      return parts.join(' · ');
     },
 
     /* ── Chapter title editing ── */
