@@ -527,9 +527,9 @@ def _apply_boundary_fades(
 
 # LF-preamble detection thresholds
 _LF_PREAMBLE_ZCR_ARTIFACT_MAX = 0.040  # avg ZCR over first 60ms must be below this
-_LF_PREAMBLE_LFR_ARTIFACT_MIN = 0.68   # peak LF ratio (LPF-proxy) over first 60ms
+_LF_PREAMBLE_LFR_ARTIFACT_MIN = 0.60   # peak LF ratio (LPF-proxy) over first 60ms
 _LF_PREAMBLE_RMS_MIN = 0.012           # avg RMS of artifact zone (rel. to local peak)
-_LF_PREAMBLE_SPEECH_ZCR_MIN = 0.070   # ZCR above this → speech has started
+_LF_PREAMBLE_SPEECH_ZCR_MIN = 0.030   # ZCR above this → speech has started
 _LF_PREAMBLE_CHECK_MS = 350           # only look within the first N ms
 _LF_PREAMBLE_ARTIFACT_ZONE_MS = 60    # initial "artifact zone" to characterise
 _LF_PREAMBLE_WINDOW_MS = 20           # analysis window per step

@@ -33,6 +33,7 @@ def _make_config(output_folder: str, chunked_audio: bool = True) -> SimpleNamesp
         audio_folder=None,
         chapter_titles_file=None,
         cover_image=None,
+        tts_chunk_smooth_join=False,   # disable crossfade so tiny test chunks aren't consumed
     )
 
 
@@ -512,7 +513,7 @@ def test_smart_chapter_list_all_chunks_complete():
         # Patch _merge_audio_files so we don't need pydub
         merged_calls: list[tuple] = []
 
-        def fake_merge(chunk_paths, output_path):
+        def fake_merge(chunk_paths, output_path, *args, **kwargs):
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             Path(output_path).write_bytes(_FAKE_WAV)
             merged_calls.append((chunk_paths, output_path))
@@ -569,7 +570,7 @@ def test_smart_chapter_list_mixed_fallback():
 
         gen = _make_generator(str(root))
 
-        def fake_merge(chunk_paths, output_path):
+        def fake_merge(chunk_paths, output_path, *args, **kwargs):
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             Path(output_path).write_bytes(_FAKE_WAV)
 
@@ -655,7 +656,7 @@ def test_smart_chapter_list_deletes_old_chapter_file():
 
         merged_output: list[str] = []
 
-        def fake_merge(chunk_paths, output_path):
+        def fake_merge(chunk_paths, output_path, *args, **kwargs):
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             Path(output_path).write_bytes(b"fresh")
             merged_output.append(output_path)
