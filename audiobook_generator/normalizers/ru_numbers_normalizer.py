@@ -102,6 +102,15 @@ PARTIAL_DATE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Bare prepositional year: "в 1917." / "во 1793," → "в ... семнадцатом" etc.
+# This is intentionally narrow and only fires when the 4-digit year stands
+# alone before punctuation or end-of-string, so explicit "1917 году" keeps
+# using YEAR_PATTERN below.
+BARE_PREPOSITIONAL_YEAR_PATTERN = re.compile(
+    r"\b(в|во)\s+([12]\d{3})(?=\s*[\.,;:!\?\)\]»\"]|\s*$)",
+    re.IGNORECASE,
+)
+
 # Year + "год" form: "1917 год", "в 1917 году" — before ORDINAL_NOUN_PATTERN
 YEAR_RANGE_PATTERN = re.compile(
     r"(?<!\w)([12]\d{3})\s*([–—-])\s*([12]\d{3})\s+(годы|год(?:а|у|ом|е)?)\b",
@@ -324,6 +333,13 @@ class NumbersRuNormalizer(BaseNormalizer):
         normalized, count = PARTIAL_DATE_PATTERN.subn(self._replace_partial_date, normalized)
         replacements += count
 
+        # Bare prepositional years ("в 1793.")
+        normalized, count = BARE_PREPOSITIONAL_YEAR_PATTERN.subn(
+            self._replace_bare_prepositional_year,
+            normalized,
+        )
+        replacements += count
+
         # Years with "год" form
         normalized, count = YEAR_RANGE_PATTERN.subn(self._replace_year_range, normalized)
         replacements += count
@@ -430,6 +446,15 @@ class NumbersRuNormalizer(BaseNormalizer):
     # ------------------------------------------------------------------
     # Handlers — years
     # ------------------------------------------------------------------
+
+    def _replace_bare_prepositional_year(self, match: re.Match[str]) -> str:
+        preposition = match.group(1)
+        year = int(match.group(2))
+        try:
+            spoken = self._to_words(year, to="ordinal", gender="m", case="p")
+        except Exception:
+            spoken = self._to_words(year)
+        return f"{preposition} {spoken}"
 
     def _replace_year_range(self, match: re.Match[str]) -> str:
         left_year = int(match.group(1))

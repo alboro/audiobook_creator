@@ -448,6 +448,7 @@ class AudioChecker:
         ref_threshold: Optional[float] = None
         ref_status: Optional[str] = None
         ref_payload: Optional[dict] = None
+        checker_results: dict[str, bool] = {}
         for checker in self._checkers:
             try:
                 result = checker.check(
@@ -460,6 +461,7 @@ class AudioChecker:
                 )
                 continue
 
+            checker_results[checker.name] = not result.disputed
             if result.disputed:
                 is_disputed = True
 
@@ -509,6 +511,28 @@ class AudioChecker:
             store.save_disputed_chunk(force_status=self.force, **save_kwargs)
         else:
             store.save_checked_chunk(force_status=self.force, **save_kwargs)
+
+        # ── 5. Persist per-checker pass/fail results ────────────────────────
+        # Only write the generic fallback column for checkers that declare
+        # uses_fallback_passed_column = True (e.g. first_word, last_word).
+        # Checkers like whisper_similarity and reference already persist their
+        # results in dedicated columns (similarity, reference_check_*); writing
+        # a redundant fallback column for them would be misleading because the
+        # fallback is later read with a fixed threshold, not the one at check time.
+        for checker in self._checkers:
+            if checker.name not in checker_results:
+                continue
+            if not type(checker).uses_fallback_passed_column:
+                continue
+            try:
+                store.save_checker_result(
+                    chapter_key, sentence_hash, checker.name, checker_results[checker.name]
+                )
+            except Exception as exc:
+                logger.debug(
+                    "  [%s] Hash %s – could not save checker result for %r: %s",
+                    chapter_key, sentence_hash[:10], checker.name, exc,
+                )
 
 
 # ---------------------------------------------------------------------------

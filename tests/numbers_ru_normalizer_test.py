@@ -248,6 +248,9 @@ class TestNumbersRuNormalizerYears(unittest.TestCase):
     def test_year_prepositional(self):
         self.assertEqual(self.n.normalize("в 1917 году"), "в тысяча девятьсот семнадцатом году")
 
+    def test_bare_year_prepositional_before_punctuation(self):
+        self.assertEqual(self.n.normalize("в 1793."), "в тысяча семьсот девяносто третьем.")
+
     def test_year_instrumental(self):
         self.assertEqual(self.n.normalize("1917 годом"), "тысяча девятьсот семнадцатым годом")
 

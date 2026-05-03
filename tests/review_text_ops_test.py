@@ -7,6 +7,7 @@ from __future__ import annotations
 from audiobook_generator.ui.review_text_ops import (
     apply_review_edit,
     collapse_adjacent_duplicate_paragraphs,
+    normalize_chunk_eof_text,
 )
 
 
@@ -144,5 +145,65 @@ def test_apply_review_edit_exact_match_not_broken_by_fuzzy():
 
     assert result == "Раз. 2. Три."
 
+
+# ---------------------------------------------------------------------------
+# normalize_chunk_eof_text
+# ---------------------------------------------------------------------------
+
+def test_normalize_chunk_eof_text_no_token_is_noop():
+    text = "Обычный текст без маркера."
+    assert normalize_chunk_eof_text(text) == text
+
+
+def test_normalize_chunk_eof_text_already_correct_is_noop():
+    text = "лет,[chunk_eof]Вы, поймёте."
+    assert normalize_chunk_eof_text(text) == text
+
+
+def test_normalize_chunk_eof_text_strips_one_space_and_capitalises():
+    text = "лет,[chunk_eof] вы, поймёте."
+    assert normalize_chunk_eof_text(text) == "лет,[chunk_eof]Вы, поймёте."
+
+
+def test_normalize_chunk_eof_text_strips_multiple_spaces_and_capitalises():
+    text = "лет,[chunk_eof]  вы, поймёте."
+    assert normalize_chunk_eof_text(text) == "лет,[chunk_eof]Вы, поймёте."
+
+
+def test_normalize_chunk_eof_text_multiple_tokens():
+    text = "a[chunk_eof] b[chunk_eof] c"
+    assert normalize_chunk_eof_text(text) == "a[chunk_eof]B[chunk_eof]C"
+
+
+def test_normalize_chunk_eof_text_token_at_end_of_string():
+    text = "текст[chunk_eof]"
+    assert normalize_chunk_eof_text(text) == "текст[chunk_eof]"
+
+
+def test_normalize_chunk_eof_text_token_followed_by_spaces_only():
+    text = "текст[chunk_eof]   "
+    assert normalize_chunk_eof_text(text) == "текст[chunk_eof]"
+
+
+def test_normalize_chunk_eof_text_real_example():
+    """The example from the task description."""
+    text = (
+        "Поскольку доктор Франклин был моим близким другом на протяжении последних тридцати лет,"
+        "[chunk_eof]Вы, естественно, поймёте, почему я сохраняю связь с его внуком."
+    )
+    # Already normalised — should be unchanged
+    assert normalize_chunk_eof_text(text) == text
+
+
+def test_normalize_chunk_eof_text_real_example_with_leading_space():
+    text = (
+        "Поскольку доктор Франклин был моим близким другом на протяжении последних тридцати лет,"
+        "[chunk_eof] вы, естественно, поймёте, почему я сохраняю связь с его внуком."
+    )
+    expected = (
+        "Поскольку доктор Франклин был моим близким другом на протяжении последних тридцати лет,"
+        "[chunk_eof]Вы, естественно, поймёте, почему я сохраняю связь с его внуком."
+    )
+    assert normalize_chunk_eof_text(text) == expected
 
 

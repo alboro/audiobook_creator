@@ -140,3 +140,40 @@ def apply_review_edit(full_text: str, old_text: str, new_text: str) -> str:
     updated = _dedupe_horizontal_whitespace_at_edit_boundary(before, actual_replacement, after)
     return collapse_adjacent_duplicate_paragraphs(updated)
 
+
+# ---------------------------------------------------------------------------
+# [chunk_eof] normalisation
+# ---------------------------------------------------------------------------
+
+_CHUNK_EOF_TOKEN = "[chunk_eof]"
+
+
+def normalize_chunk_eof_text(text: str) -> str:
+    """Normalise a sentence text that may contain ``[chunk_eof]`` markers.
+
+    For each ``[chunk_eof]`` occurrence:
+
+    * strip any immediately following space characters (`` ``),
+    * capitalise the very first printable character that follows.
+
+    Only plain space characters (U+0020) are stripped — intentional newlines
+    or other whitespace inside a sentence are left intact.
+
+    Example::
+
+        "лет,[chunk_eof]Вы"          → unchanged (already correct)
+        "лет,[chunk_eof] вы"         → "лет,[chunk_eof]Вы"
+        "лет,[chunk_eof]  вы"        → "лет,[chunk_eof]Вы"
+        "a[chunk_eof] b[chunk_eof] c" → "a[chunk_eof]B[chunk_eof]C"
+    """
+    if _CHUNK_EOF_TOKEN not in text:
+        return text
+    parts = text.split(_CHUNK_EOF_TOKEN)
+    normalised = [parts[0]]
+    for part in parts[1:]:
+        stripped = part.lstrip(" ")
+        if stripped:
+            stripped = stripped[0].upper() + stripped[1:]
+        normalised.append(stripped)
+    return _CHUNK_EOF_TOKEN.join(normalised)
+

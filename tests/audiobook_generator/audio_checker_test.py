@@ -595,6 +595,29 @@ class WhisperDigitFalseDisputedTests(unittest.TestCase):
         self.assertEqual(counters["disputed"], 0, "Year-range title should not be disputed")
         self.assertEqual(counters["checked"], 1)
 
+    def test_bare_prepositional_year_not_false_disputed(self):
+        """Whisper 'в 1793.' should normalize to the ordinal prepositional year."""
+        if self._skip:
+            self.skipTest(f"pre_compare normalizer unavailable: {self._skip}")
+
+        original = (
+            "Сравнение французской и английской версий, предложение за предложением, "
+            "доказало мне, что перевод, посланный Лантенасом Мерлену де Тионвилю "
+            "в тысяча семьсот девяносто четвёртом году, - тот же самый, "
+            "что он послал Кутону в тысяча семьсот девяносто третьем."
+        )
+        transcription = (
+            "сравнение французской и английской версии предложение за предложением доказало мне, "
+            "что перевод посланный Лантенасом Мирлену де Тоанвилю в 1794 году тот же самый, "
+            "что он послал Кутону в 1793."
+        )
+        counters = self._run_one_file(original, transcription, threshold=0.94)
+        self.assertEqual(
+            counters["disputed"], 0,
+            "Bare prepositional year should normalize to ordinal and avoid false disputed",
+        )
+        self.assertEqual(counters["checked"], 1)
+
     def test_without_pre_compare_digits_cause_low_similarity(self):
         """
         Control: WITHOUT pre_compare, digit form vs word form has very low similarity.
@@ -659,3 +682,50 @@ class WhisperDigitFalseDisputedTests(unittest.TestCase):
         norm_before = _normalize_for_compare(text)
         norm_after = _normalize_for_compare(result)
         self.assertEqual(norm_before, norm_after, "pre_compare must not touch plain text")
+
+
+def test_check_one_file_persists_per_checker_passed_columns():
+    """first_word/last_word checkers write checker_<name>_passed columns; whisper_similarity does not."""
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        audio_path = output_dir / "wav" / "chunks" / "0001_Test" / "hash_checker_cols.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"fake wav")
+
+        cfg = SimpleNamespace(
+            audio_check_checkers="whisper_similarity,first_word,last_word",
+            audio_check_threshold=0.5,
+            audio_reference_check_command=None,
+            audio_reference_check_threshold=None,
+            audio_reference_check_timeout=None,
+            audio_reference_check_cache_dir=None,
+            audio_reference_check_stress=None,
+            language="ru",
+            output_folder=str(output_dir),
+            ffmpeg_path=None,
+            prepared_text_folder=None,
+        )
+
+        store = AudioChunkStore(output_dir / "wav" / "_state" / "audio_chunks.sqlite3")
+        checker = AudioChecker(output_folder=output_dir, threshold=0.5, config=cfg)
+        checker._pre_compare = None
+        checker._transcribe = lambda _path: "Привет мир"
+
+        counters = {"checked": 0, "disputed": 0, "skipped": 0}
+        checker._check_one_file(
+            audio_path, "0001_Test", "hash_checker_cols", "Привет, мир.", store, counters,
+        )
+
+        assert counters["checked"] == 1
+
+        # first_word and last_word use the fallback column — must be persisted
+        result = store.get_all_checker_passed_columns("0001_Test", "hash_checker_cols")
+        assert "first_word" in result, "checker_first_word_passed column missing"
+        assert "last_word" in result, "checker_last_word_passed column missing"
+        assert result["first_word"] is not None, "checker_first_word_passed should not be NULL"
+        assert result["last_word"] is not None, "checker_last_word_passed should not be NULL"
+
+        # whisper_similarity has uses_fallback_passed_column=False — must NOT write a fallback column
+        assert "whisper_similarity" not in result, (
+            "checker_whisper_similarity_passed should not exist (similarity is stored in 'similarity' column)"
+        )

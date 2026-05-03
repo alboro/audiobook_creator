@@ -106,6 +106,28 @@ class WhisperSimilarityChecker(BaseAudioChunkChecker):
 
     name = "whisper_similarity"
 
+    # Pass/fail is derived from the existing ``similarity`` column — no
+    # separate ``checker_whisper_similarity_passed`` fallback column needed.
+    uses_fallback_passed_column = False
+
+    @classmethod
+    def evaluate_from_row(cls, row: dict, config) -> Optional[bool]:
+        sim = row.get("similarity")
+        if sim is None:
+            return None
+        try:
+            threshold = float(
+                getattr(config, "audio_check_threshold", None) or DEFAULT_THRESHOLD
+            )
+        except (TypeError, ValueError):
+            threshold = DEFAULT_THRESHOLD
+        return float(sim) >= threshold
+
+    @classmethod
+    def score_from_row(cls, row: dict, config) -> Optional[float]:
+        sim = row.get("similarity")
+        return float(sim) if sim is not None else None
+
     def __init__(self, config):
         super().__init__(config)
         _t = getattr(config, "audio_check_threshold", None)

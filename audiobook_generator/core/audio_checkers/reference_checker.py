@@ -41,6 +41,40 @@ class ReferenceChecker(BaseAudioChunkChecker):
 
     name = "reference"
 
+    # Pass/fail is derived from the existing ``reference_check_status`` /
+    # ``reference_check_score`` columns — no fallback column needed.
+    uses_fallback_passed_column = False
+
+    @classmethod
+    def evaluate_from_row(cls, row: dict, config) -> Optional[bool]:
+        status = row.get("reference_check_status")
+        if status is None:
+            return None
+        if status == "ok":
+            return True
+        if status == "suspicious":
+            return False
+        if status == "measured":
+            # Threshold was None when the check ran; re-evaluate with the
+            # threshold currently in config (if any).
+            score = row.get("reference_check_score")
+            if score is None:
+                return None
+            try:
+                threshold = float(
+                    getattr(config, "audio_reference_check_threshold", None) or 0
+                )
+            except (TypeError, ValueError):
+                return None
+            return float(score) <= threshold if threshold > 0 else None
+        # "error" or unknown — cannot determine pass/fail
+        return None
+
+    @classmethod
+    def score_from_row(cls, row: dict, config) -> Optional[float]:
+        score = row.get("reference_check_score")
+        return float(score) if score is not None else None
+
     def __init__(self, config):
         super().__init__(config)
         self._command = getattr(config, "audio_reference_check_command", None) or ""

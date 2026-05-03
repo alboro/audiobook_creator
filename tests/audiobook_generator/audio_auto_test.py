@@ -195,8 +195,8 @@ class TestRunAudioAuto:
         bad_chunk = chunk_dir / "bad0000.wav"
         bad_chunk.write_bytes(_pcm_wav())
 
-        # Record a failing similarity in DB
-        store.save_checked_chunk("0001_Ch", "bad0000", "bad text", "wrong transc", 0.50)
+        # Record a failing chunk in DB — must be 'disputed' for get_all_failed_chunks to find it
+        store.save_disputed_chunk("0001_Ch", "bad0000", "bad text", "wrong transc", 0.50)
 
         config = _make_auto_config(tmp_path, threshold=0.78, max_retry=1)
 
@@ -246,8 +246,8 @@ class TestRunAudioAuto:
                 # Re-create the bad chunk file each time it's "re-synthesised"
                 bad = chunk_dir / "stubborn00.wav"
                 bad.write_bytes(_pcm_wav())
-                # Record a failing similarity so it keeps failing
-                store.save_checked_chunk("0001_Ch", "stubborn00", "text", "wrong", 0.50)
+                # Record a failing chunk — must be 'disputed' for get_all_failed_chunks to find it
+                store.save_disputed_chunk("0001_Ch", "stubborn00", "text", "wrong", 0.50)
 
             MockGen.return_value.run.side_effect = fake_synth_run
 
@@ -278,7 +278,7 @@ class TestRunAudioAuto:
             def fake_synth():
                 bad = chunk_dir / "repeat000.wav"
                 bad.write_bytes(_pcm_wav())
-                store.save_checked_chunk("0001_Ch", "repeat000", "text", "wrong", 0.50)
+                store.save_disputed_chunk("0001_Ch", "repeat000", "text", "wrong", 0.50)
 
             MockGen.return_value.run.side_effect = fake_synth
             mock_checker_inst = MagicMock()

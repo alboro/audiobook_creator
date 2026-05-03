@@ -44,7 +44,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-siz
 .voice-badge{display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:600;color:#89dceb;background:#0d2030;border:1px solid #1e4060;border-radius:10px;padding:1px 6px;margin-left:6px;vertical-align:middle}
 .retry-badge{display:inline-flex;align-items:center;font-size:9px;font-weight:700;color:#f9e2af;background:#2a2010;border:1px solid #5a4a20;border-radius:10px;padding:1px 6px;margin-left:4px;vertical-align:middle;title:"auto-retry count"}
 .disputed-panel{margin-top:6px;border-top:1px solid #313244;padding-top:6px}
-.disp-sim{font-size:9px;color:#f38ba8;font-family:monospace;margin-bottom:3px}
 .disp-transcription{font-size:11px;color:#fab387;line-height:1.4;white-space:pre-wrap;word-break:break-word;border-left:2px solid #f38ba8;padding-left:6px;margin-top:3px}
 .cnum{font-size:10px;color:#6c7086;min-width:26px;padding-top:4px;text-align:right;flex-shrink:0}
 .cbody{flex:1;min-width:0}
@@ -87,6 +86,11 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
 .chapter-title-input{flex:1;background:#252538;color:#cdd6f4;border:1px solid #89b4fa;border-radius:4px;padding:3px 8px;font-size:14px;font-weight:600;outline:none;min-width:0}
 .ctiming{font-size:9px;color:#585870;font-family:monospace;margin-left:6px;letter-spacing:.02em}
 .ctiming-pos{color:#45475a}
+.checker-results{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px}
+.checker-badge{display:inline-flex;align-items:center;font-size:9px;font-weight:700;font-family:monospace;border-radius:8px;padding:1px 7px;letter-spacing:.03em}
+.checker-pass{color:#a6e3a1;background:#162716;border:1px solid #2d4a2d}
+.checker-fail{color:#f38ba8;background:#2a1520;border:1px solid #4a2535}
+.checker-unknown{color:#6c7086;background:#1e1e2e;border:1px solid #313244}
 </style>
 </head>
 <body x-data="reviewApp()" x-init="boot()">
@@ -125,9 +129,12 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
               @click="toggleAutoplay()"
               x-text="playlist.mode ? '⏹ Stop' : '▶ Autoplay'"></button>
     </template>
-    <template x-if="currentChapter">
-      <button class="btn btn-primary" @click="synthesize()" :disabled="synthesizing"
-              x-text="synthesizing ? 'Synthesizing...' : 'Synthesize'"></button>
+    <template x-if="currentChapter && _visibleDisputedCount() > 0">
+      <button class="btn"
+              style="background:#1e3a2e;color:#a6e3a1;border:1px solid #2e5a3e"
+              @click="markAllResolved()"
+              :disabled="markingResolved"
+              x-text="markingResolved ? 'Resolving...' : 'Mark resolved (' + _visibleDisputedCount() + ')'"></button>
     </template>
     <span class="spill" :class="{err:statusErr}" x-text="statusMsg" x-show="statusMsg"></span>
   </div>
@@ -165,13 +172,29 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
       </template>
     </div>
 
+    <!-- Per-checker filter bar (visible only in disputed mode, when there are multiple checkers) -->
+    <template x-if="showOnlyDisputed && configuredCheckerNames.length > 1">
+      <div style="display:flex;gap:10px;align-items:center;padding:4px 10px 4px;border-bottom:1px solid #313244;background:#1e1e2e">
+        <span style="font-size:11px;color:#6c7086">Показывать:</span>
+        <template x-for="name in configuredCheckerNames" :key="name">
+          <label style="display:flex;gap:4px;align-items:center;font-size:11px;color:#cdd6f4;cursor:pointer;user-select:none">
+            <input type="checkbox"
+                   :checked="disputeCheckerFilter[name] !== false"
+                   @change="toggleCheckerFilter(name)"
+                   style="accent-color:#89b4fa;cursor:pointer">
+            <span x-text="name"></span>
+          </label>
+        </template>
+      </div>
+    </template>
+
     <div class="chunk-list">
       <template x-if="!currentChapter"><div class="empty">&larr; Select a chapter</div></template>
       <template x-if="chunksLoading"><div class="empty"><span class="spin"></span> Loading&hellip;</div></template>
 
-      <template x-for="item in sortedChunkItems()" :key="item.chunk.hash + '_' + item.origIdx">
+      <template x-for="item in sortedChunks" :key="item.chunk.hash + '_' + item.origIdx">
         <div class="chunk-row"
-             x-show="!showOnlyDisputed || isDisputed(item.chunk.hash)"
+             x-show="!showOnlyDisputed || isDisputedFiltered(item.chunk.hash)"
              :data-ci="item.origIdx"
              :class="{playing: playingIdx===item.origIdx && !histPlaying, editing: editingIdx===item.origIdx, 'hist-open': histChunk===item.origIdx, disputed: isDisputed(item.chunk.hash) && disputeChunk!==item.origIdx}">
 
@@ -189,8 +212,8 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
                 <template x-if="item.chunk.has_audio && chunkTimingStr(item.chunk, item.origIdx)">
                   <span class="ctiming" x-text="chunkTimingStr(item.chunk, item.origIdx)"></span>
                 </template>
-                <template x-if="item.chunk.has_audio && item.chunk.created_at">
-                  <span class="ctiming ctiming-pos" x-text="_fmtCreatedAt(item.chunk.created_at)"></span>
+                <template x-if="item.chunk.has_audio && item.chunk.file_mtime">
+                  <span class="ctiming ctiming-pos" x-text="_fmtCreatedAt(item.chunk.file_mtime)"></span>
                 </template>
                 <template x-if="item.chunk.has_audio && item.chunk.auto_retry_count > 0">
                   <span class="retry-badge" :title="'re-synthesised ' + item.chunk.auto_retry_count + ' time(s)'" x-text="'↻' + item.chunk.auto_retry_count"></span>
@@ -244,7 +267,12 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
 
             <template x-if="disputeChunk === item.origIdx">
               <div class="disputed-panel">
-                <div class="disp-sim" x-text="'similarity: ' + (disputedMap[item.chunk.hash]?.similarity?.toFixed(2) ?? '?')"></div>
+                <!-- Per-checker results (green = pass, red = fail, grey = not yet run) -->
+                <div class="checker-results" x-show="checkerResultsList(item.chunk.hash).length > 0">
+                  <template x-for="cr in checkerResultsList(item.chunk.hash)" :key="cr.name">
+                    <span :class="_checkerBadgeClass(cr.passed)" x-text="_checkerBadgeLabel(cr)"></span>
+                  </template>
+                </div>
                 <div style="font-size:10px;color:#6c7086;margin-bottom:2px">Normalized transcription:</div>
                 <div class="disp-transcription" x-text="disputedMap[item.chunk.hash]?.transcription ?? ''"></div>
                 <div style="margin-top:6px;display:flex;gap:5px">
@@ -314,7 +342,7 @@ function reviewApp() {
     chunksLoading: false,
     statusMsg: '',
     statusErr: false,
-    synthesizing: false,
+    markingResolved: false,
     // playback
     playingIdx: -1,      // chunk index currently highlighted as "playing"
     lastPlayedIdx: -1,   // last chunk played (for Play All resume)
@@ -334,10 +362,16 @@ function reviewApp() {
     histEntries: [],
     histSel: -1,
     // disputed
-    disputedMap: {},   // hash → {similarity, transcription, resolved}
+    disputedMap: {},   // hash → {similarity, transcription, resolved, checker_results}
     disputeChunk: -1,  // index of chunk whose dispute panel is open
     showOnlyDisputed: false,
     disputeThreshold: 0.70,
+    checkerDetailsMap: {},        // hash → {checker_results: {name: {passed, score}}}
+    configuredCheckerNames: [],   // ordered list from /api/settings
+    disputeCheckerFilter: {},     // checker_name → bool (true = enabled)
+    disputeFilteredHashes: {},    // hash → bool (пересчитывается явно через _recomputeDisputeFilter)
+    disputeFilteredCount: 0,      // число хэшей где disputeFilteredHashes[h] === true
+    disputeSingleFailCount: 0,    // из filtered: у кого ровно 1 включённый чекер упал
     histAudioSrc: '',
     playbackRate: 1.0,
     // chapter title editing
@@ -347,6 +381,7 @@ function reviewApp() {
     chapterTitlesPath: null,
     // sort order for chunk list and autoplay
     chunkSortOrder: 'natural',   // 'natural' | 'newest_first'
+    sortedChunks: [],            // explicit reactive cache; rebuilt by _recomputeSortedChunks()
     // timing
     chapterOffsets: {},      // chapter_key → book-global start offset (s)
     chunkChapOffsets: [],    // per-chunk cumulative chapter offset (s), indexed by chunk position
@@ -365,12 +400,19 @@ function reviewApp() {
         }
       });
 
+      // Keep sortedChunks up-to-date whenever chunks or sort order change.
+      this.$watch('chunks', () => this._recomputeSortedChunks());
+      this.$watch('chunkSortOrder', () => this._recomputeSortedChunks());
+
       try {
         const r = await fetch('/api/settings');
         if (r.ok) {
           const s = await r.json();
           if (typeof s.audio_check_threshold === 'number') {
             this.disputeThreshold = s.audio_check_threshold;
+          }
+          if (Array.isArray(s.checker_names) && s.checker_names.length) {
+            this.configuredCheckerNames = s.checker_names;
           }
         }
       } catch (e) { console.warn('[boot] /api/settings fetch failed:', e); }
@@ -441,6 +483,7 @@ function reviewApp() {
     async loadChapters() {
       if (!this.outputDir) return;
       localStorage.setItem('rev_dir', this.outputDir);
+      this._initCheckerFilter();
       this.loading = true;
       this.st('Loading...');
       this.chapters = [];
@@ -506,6 +549,7 @@ function reviewApp() {
         }
         if (Object.keys(preliminary).length > 0) {
           this.disputedMap = preliminary;
+          this._recomputeDisputeFilter();
         }
 
         // Pre-compute cumulative chapter offsets for timing badges (O(n), done once).
@@ -544,6 +588,7 @@ function reviewApp() {
           m[row.hash] = row;
         }
         this.disputedMap = m;
+        this._recomputeDisputeFilter();
       } catch (_) {}
     },
 
@@ -551,8 +596,112 @@ function reviewApp() {
       return !!this.disputedMap[hash];
     },
 
+    isDisputedFiltered(hash) {
+      return !!this.disputeFilteredHashes[hash];
+    },
+
+    // Пересчитывает disputeFilteredHashes на основе текущих disputedMap + disputeCheckerFilter.
+    // Вызывается явно: после загрузки disputedMap и при каждом изменении фильтра.
+    _recomputeDisputeFilter() {
+      const enabled = new Set(
+        this.configuredCheckerNames.filter(n => this.disputeCheckerFilter[n] !== false)
+      );
+      const result = {};
+      for (const [hash, row] of Object.entries(this.disputedMap)) {
+        const cr = row.checker_results;
+        if (!cr || Object.keys(cr).length === 0) {
+          // Нет данных чекеров → показываем если хотя бы один включён.
+          result[hash] = enabled.size > 0;
+          continue;
+        }
+        const failedNames = Object.entries(cr)
+          .filter(([, r]) => r.passed === false)
+          .map(([name]) => name);
+        if (failedNames.length === 0) {
+          // Все null → причина неизвестна → показываем если хотя бы один включён.
+          result[hash] = enabled.size > 0;
+        } else {
+          // Показываем только если хотя бы один «сломавший» чекер включён.
+          result[hash] = failedNames.some(name => enabled.has(name));
+        }
+      }
+      this.disputeFilteredHashes = result;
+      this.disputeFilteredCount = Object.values(result).filter(Boolean).length;
+      // Считаем только visible-чанки, у которых ровно 1 включённый чекер упал.
+      let singleFail = 0;
+      for (const [hash, visible] of Object.entries(result)) {
+        if (!visible) continue;
+        const cr = (this.disputedMap[hash]?.checker_results) || {};
+        const failCount = [...enabled].filter(n => cr[n]?.passed === false).length;
+        if (failCount === 1) singleFail++;
+      }
+      this.disputeSingleFailCount = singleFail;
+    },
+
+    _initCheckerFilter() {
+      const saved = localStorage.getItem('dcf_' + this.outputDir);
+      let f = {};
+      if (saved) { try { f = JSON.parse(saved); } catch (_) {} }
+      for (const name of this.configuredCheckerNames) {
+        f[name] = f[name] !== false; // явный boolean: undefined/true → true, false → false
+      }
+      this.disputeCheckerFilter = f;
+    },
+
+    toggleCheckerFilter(name) {
+      this.disputeCheckerFilter[name] = !this.disputeCheckerFilter[name];
+      this._recomputeDisputeFilter();
+      try { localStorage.setItem('dcf_' + this.outputDir, JSON.stringify(this.disputeCheckerFilter)); } catch (_) {}
+    },
+
     toggleDisputed(i) {
-      this.disputeChunk = (this.disputeChunk === i) ? -1 : i;
+      if (this.disputeChunk === i) { this.disputeChunk = -1; return; }
+      this.disputeChunk = i;
+      const hash = this.chunks[i]?.hash;
+      if (hash && !this.checkerDetailsMap[hash]) {
+        this._loadCheckerDetails(i);
+      }
+    },
+
+    async _loadCheckerDetails(i) {
+      const chunk = this.chunks[i];
+      if (!chunk || !this.currentChapter) return;
+      try {
+        const r = await fetch(
+          '/api/chunk_check_details?dir=' + encodeURIComponent(this.outputDir)
+          + '&chapter_key=' + encodeURIComponent(this.currentChapter.key)
+          + '&hash=' + chunk.hash
+        );
+        if (r.ok) {
+          const d = await r.json();
+          this.checkerDetailsMap = { ...this.checkerDetailsMap, [chunk.hash]: d };
+        }
+      } catch (_) {}
+    },
+
+    // Returns [{name, passed, score}] for the ordered configured checkers
+    checkerResultsList(hash) {
+      const details = this.checkerDetailsMap[hash];
+      const names = this.configuredCheckerNames.length
+        ? this.configuredCheckerNames
+        : Object.keys(details?.checker_results || {});
+      if (!names.length) return [];
+      const results = details?.checker_results || {};
+      return names.map(name => {
+        const r = results[name];
+        return { name, passed: r?.passed ?? null, score: r?.score ?? null };
+      });
+    },
+
+    _checkerBadgeClass(passed) {
+      if (passed === true)  return 'checker-badge checker-pass';
+      if (passed === false) return 'checker-badge checker-fail';
+      return 'checker-badge checker-unknown';
+    },
+
+    _checkerBadgeLabel(cr) {
+      const score = cr.score !== null ? ' ' + cr.score.toFixed(2) : '';
+      return cr.name.replace(/_/g, ' ') + score;
     },
 
     async resolveDisputed(i) {
@@ -580,12 +729,17 @@ function reviewApp() {
     },
 
     /* ── Sorted chunk view ── */
-    sortedChunkItems() {
+    _recomputeSortedChunks() {
       const items = this.chunks.map((chunk, i) => ({ chunk, origIdx: i }));
       if (this.chunkSortOrder === 'newest_first') {
-        items.sort((a, b) => (b.chunk.created_at || 0) - (a.chunk.created_at || 0));
+        items.sort((a, b) => (b.chunk.file_mtime || 0) - (a.chunk.file_mtime || 0));
       }
-      return items;
+      this.sortedChunks = items;
+    },
+
+    // Kept for _buildPlaylistIndices compatibility.
+    sortedChunkItems() {
+      return this.sortedChunks;
     },
 
     /* ── Playlist core ── */
@@ -602,7 +756,7 @@ function reviewApp() {
       }
       if (mode === 'disputed') {
         return sorted
-          .filter(item => this.isDisputed(item.chunk.hash))
+          .filter(item => this.isDisputedFiltered(item.chunk.hash))
           .map(item => item.origIdx);
       }
       return [];
@@ -1142,24 +1296,59 @@ function reviewApp() {
       if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
     },
 
-    /* ── Synthesize ── */
-    async synthesize() {
+    /* ── Mark all resolved ── */
+
+    // Count of disputed chunks the bulk button will act on.
+    // When in disputed mode: visible chunks where exactly 1 enabled checker failed;
+    // when in full mode: all disputed in the chapter.
+    _visibleDisputedCount() {
+      if (this.showOnlyDisputed) {
+        return this.disputeSingleFailCount;
+      }
+      return Object.keys(this.disputedMap).length;
+    },
+
+    async markAllResolved() {
       if (!this.currentChapter) return;
-      this.synthesizing = true;
-      this.st('Synthesis started...');
-      try {
-        const r = await fetch(
-          '/api/synthesize?dir=' + encodeURIComponent(this.outputDir)
-          + '&chapter_key=' + encodeURIComponent(this.currentChapter.key)
-          + '&text_path=' + encodeURIComponent(this.currentChapter.text_path),
-          { method: 'POST' }
+      let hashes;
+      if (this.showOnlyDisputed) {
+        const enabled = new Set(
+          this.configuredCheckerNames.filter(n => this.disputeCheckerFilter[n] !== false)
         );
-        const d = await r.json();
-        this.st(d.status === 'already_running' ? 'Already running' : 'Running in background...');
+        hashes = Object.keys(this.disputeFilteredHashes).filter(h => {
+          if (!this.disputeFilteredHashes[h]) return false;
+          const cr = (this.disputedMap[h]?.checker_results) || {};
+          const failCount = [...enabled].filter(n => cr[n]?.passed === false).length;
+          return failCount === 1;
+        });
+      } else {
+        hashes = Object.keys(this.disputedMap);
+      }
+      if (!hashes.length) return;
+      this.markingResolved = true;
+      try {
+        for (const hash of hashes) {
+          const r = await fetch('/api/disputed/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              dir: this.outputDir,
+              chapter_key: this.currentChapter.key,
+              hash,
+            }),
+          });
+          if (!r.ok) throw new Error(await r.text());
+        }
+        // Remove resolved hashes from local disputed state.
+        const m = { ...this.disputedMap };
+        for (const hash of hashes) delete m[hash];
+        this.disputedMap = m;
+        this._recomputeDisputeFilter();
+        this.st('Resolved ' + hashes.length);
       } catch (e) {
         this.st('Error: ' + e.message, true);
       } finally {
-        setTimeout(() => { this.synthesizing = false; }, 3000);
+        this.markingResolved = false;
       }
     },
   };

@@ -188,6 +188,95 @@ class AudioChunkStore:
                 ", ".join(added),
             )
 
+    def _ensure_checker_column_in_conn(self, conn, checker_name: str) -> None:
+        """Add checker_<name>_passed column to chunk_cache if it does not exist yet.
+
+        The column stores per-checker pass/fail results:
+          NULL  = checker has never been run for this chunk
+          1     = checker passed (not disputed)
+          0     = checker failed (disputed)
+        """
+        col = f"checker_{checker_name}_passed"
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(chunk_cache)")}
+        if col not in existing:
+            conn.execute(f"ALTER TABLE chunk_cache ADD COLUMN {col} INTEGER")
+            conn.commit()
+            logger.debug("Added checker column %r to chunk_cache", col)
+
+    # ------------------------------------------------------------------
+    # Per-checker result persistence
+    # ------------------------------------------------------------------
+
+    def save_checker_result(
+        self,
+        chapter_key: str,
+        sentence_hash: str,
+        checker_name: str,
+        passed: bool,
+    ) -> None:
+        """Store pass/fail result for a single checker in its dedicated column.
+
+        The column ``checker_<name>_passed`` is created automatically if it does
+        not yet exist.  Only rows already present in ``chunk_cache`` are updated;
+        if no row exists the call is silently a no-op.
+        """
+        col = f"checker_{checker_name}_passed"
+        with closing(self._connect()) as conn:
+            self._ensure_checker_column_in_conn(conn, checker_name)
+            conn.execute(
+                f"UPDATE chunk_cache SET {col} = ? WHERE chapter_key = ? AND sentence_hash = ?",
+                (1 if passed else 0, chapter_key, sentence_hash),
+            )
+            conn.commit()
+
+    def get_all_checker_passed_columns(
+        self,
+        chapter_key: str,
+        sentence_hash: str,
+    ) -> dict[str, Optional[bool]]:
+        """Return ``{checker_name: passed}`` for every ``checker_*_passed`` column.
+
+        Values:
+          ``True``  – checker passed for this chunk
+          ``False`` – checker failed (flagged as disputed)
+          ``None``  – column exists but was never populated for this chunk
+        """
+        with closing(self._connect()) as conn:
+            all_cols = [row[1] for row in conn.execute("PRAGMA table_info(chunk_cache)")]
+            checker_cols = [
+                c for c in all_cols
+                if c.startswith("checker_") and c.endswith("_passed")
+            ]
+            if not checker_cols:
+                return {}
+            row = conn.execute(
+                f"SELECT {', '.join(checker_cols)} FROM chunk_cache "
+                "WHERE chapter_key = ? AND sentence_hash = ?",
+                (chapter_key, sentence_hash),
+            ).fetchone()
+            if not row:
+                return {}
+            out: dict[str, Optional[bool]] = {}
+            for col in checker_cols:
+                name = col[8:-7]  # strip "checker_" (8) and "_passed" (7)
+                val = row[col]
+                out[name] = (val == 1) if val is not None else None
+            return out
+
+    def get_chunk_cache_full_row(
+        self,
+        chapter_key: str,
+        sentence_hash: str,
+    ) -> Optional[sqlite3.Row]:
+        """Return the full ``chunk_cache`` row for a (chapter_key, sentence_hash) pair."""
+        with closing(self._connect()) as conn:
+            return conn.execute(
+                "SELECT * FROM chunk_cache WHERE chapter_key = ? AND sentence_hash = ?",
+                (chapter_key, sentence_hash),
+            ).fetchone()
+
+    # ------------------------------------------------------------------
+
     def _upsert_chunk_cache(
         self,
         *,
@@ -446,7 +535,7 @@ class AudioChunkStore:
             chapter_key, sentence_hash[:8],
         )
 
-    def get_disputed_chunks(self, chapter_key: str, threshold: float = 0.70) -> List[sqlite3.Row]:
+    def get_disputed_chunks(self, chapter_key: str, threshold: float = 0.70) -> List[dict]:
         """Return chunks that are disputed for this chapter.
 
         Only rows whose main ``status`` is ``'disputed'`` are returned.
@@ -456,7 +545,7 @@ class AudioChunkStore:
         not an alternate source of disputed state for the Review UI.
         """
         with closing(self._connect()) as conn:
-            return conn.execute(
+            rows = conn.execute(
                 """
                 SELECT * FROM chunk_cache
                 WHERE chapter_key = ?
@@ -465,6 +554,7 @@ class AudioChunkStore:
                 """,
                 (chapter_key, STATUS_DISPUTED),
             ).fetchall()
+            return [dict(r) for r in rows]
 
     def resolve_disputed_chunk(self, chapter_key: str, sentence_hash: str) -> None:
         """Mark a disputed chunk as resolved."""

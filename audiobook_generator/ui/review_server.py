@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from audiobook_generator.config.ini_config_manager import load_merged_ini
 from audiobook_generator.core.audio_chunk_store import AudioChunkStore
 from audiobook_generator.core.chunked_audio_generator import split_sentences_with_voices
-from audiobook_generator.ui.review_text_ops import apply_review_edit
+from audiobook_generator.ui.review_text_ops import apply_review_edit, normalize_chunk_eof_text
 from audiobook_generator.utils.existing_chapters_loader import (
     ExistingChapter,
     find_latest_run_folder,
@@ -259,14 +259,10 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
         h = _sentence_hash(chunk)
         audio_path = _find_chunk_path(dir, chapter_key, h)
         dur = _get_dur(h, audio_path) if audio_path else None
-        created_at: float | None = None
+        file_mtime: float | None = None
         if audio_path:
             try:
-                st = Path(audio_path).stat()
-                # Prefer birth time (creation time) when available (macOS/APFS).
-                # st_mtime changes when post-processing modifies the file in place;
-                # st_birthtime stays fixed at the moment TTS first created the file.
-                created_at = getattr(st, "st_birthtime", None) or st.st_mtime
+                file_mtime = Path(audio_path).stat().st_mtime
             except OSError:
                 pass
         result.append({
@@ -280,8 +276,8 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
             "auto_retry_count": retry_counts.get(h, 0),
             # WAV duration in seconds (null when audio not yet synthesised)
             "duration_s": round(dur, 3) if dur is not None else None,
-            # Unix timestamp (seconds) when the audio file was last modified
-            "created_at": round(created_at) if created_at is not None else None,
+            # Unix timestamp (seconds) of audio file last modification time
+            "file_mtime": round(file_mtime) if file_mtime is not None else None,
             # audio-check status from DB: 'checked' | 'disputed' | 'resolved' | null
             "check_status": check_statuses.get(h),
             # whisper similarity score from last audio_check run (null if never checked)
@@ -371,9 +367,10 @@ class SaveEditRequest(BaseModel):
 @app.post("/api/save")
 async def save_edit(req: SaveEditRequest):
     """Save edited sentence to text file and record in version history."""
-    if not req.new_text.strip():
+    new_text = normalize_chunk_eof_text(req.new_text)
+    if not new_text.strip():
         raise HTTPException(400, "New text is empty")
-    if req.old_text == req.new_text:
+    if req.old_text == new_text:
         return {"status": "no_change"}
 
     text_file = Path(req.text_path)
@@ -381,12 +378,12 @@ async def save_edit(req: SaveEditRequest):
         raise HTTPException(404, "Text file not found")
 
     old_hash = _sentence_hash(req.old_text)
-    new_hash = _sentence_hash(req.new_text)
+    new_hash = _sentence_hash(new_text)
 
     full_text = text_file.read_text(encoding="utf-8")
 
     try:
-        new_full_text = apply_review_edit(full_text, req.old_text, req.new_text)
+        new_full_text = apply_review_edit(full_text, req.old_text, new_text)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     text_file.write_text(new_full_text, encoding="utf-8")
@@ -395,7 +392,7 @@ async def save_edit(req: SaveEditRequest):
     try:
         store = AudioChunkStore(db_path)
         store.save_sentence_version(old_hash, req.old_text, replaced_by_hash=new_hash)
-        store.save_sentence_version(new_hash, req.new_text)
+        store.save_sentence_version(new_hash, new_text)
     except Exception as e:
         print(f"[review_server] DB history error (non-fatal): {e}")
 
@@ -594,7 +591,193 @@ async def get_settings():
         threshold = float(threshold)
     except (TypeError, ValueError):
         threshold = 0.70
-    return {"audio_check_threshold": threshold}
+
+    # Checker names configured in [audio_check] audio_check_checkers
+    checker_names = _get_configured_checker_names()
+
+    return {"audio_check_threshold": threshold, "checker_names": checker_names}
+
+
+def _get_configured_checker_names() -> list[str]:
+    """Return ordered checker names from config, falling back to DEFAULT_CHECKERS."""
+    from audiobook_generator.core.audio_checkers.base_audio_chunk_checker import DEFAULT_CHECKERS
+    cfg = getattr(app.state, "review_config", None)
+    spec = getattr(cfg, "audio_check_checkers", None)
+    if not spec:
+        try:
+            ini = load_merged_ini()
+            spec = ini.get("audio_check_checkers")
+        except Exception:
+            pass
+    spec = (spec or DEFAULT_CHECKERS).strip()
+    return [n.strip() for n in spec.split(",") if n.strip()]
+
+
+def _get_effective_cfg():
+    """Return a config object guaranteed to have ``audio_check_threshold`` set.
+
+    ``review_config`` may be a ``UiConfig`` (standalone review server) or a full
+    ``GeneralConfig`` (launched from main.py).  ``UiConfig`` has no
+    ``audio_check_threshold``, so we supplement it with the INI value to ensure
+    checker classmethods (``evaluate_from_row``) always receive the real threshold
+    instead of silently falling back to the 0.70 default.
+    """
+    from types import SimpleNamespace
+    cfg = getattr(app.state, "review_config", None)
+
+    # Fast path: config already provides the threshold.
+    if getattr(cfg, "audio_check_threshold", None) is not None:
+        return cfg
+
+    # Resolve from INI with the same fallback chain used by /api/settings.
+    threshold: float = 0.70
+    try:
+        ini = load_merged_ini()
+        raw = ini.get("audio_check_threshold")
+        if raw is not None:
+            threshold = float(raw)
+    except Exception:
+        pass
+
+    # Wrap: keep all existing attrs from cfg (if any) and add audio_check_threshold.
+    base = vars(cfg) if cfg is not None else {}
+    return SimpleNamespace(**base, audio_check_threshold=threshold)
+
+
+def _get_checker_class(checker_name: str):
+    """Return the checker *class* for *checker_name*, or None if unknown."""
+    from audiobook_generator.core.audio_checkers.base_audio_chunk_checker import (
+        AUDIO_CHECKER_REGISTRY,
+    )
+    import importlib
+
+    entry = AUDIO_CHECKER_REGISTRY.get(checker_name)
+    if not entry:
+        return None
+    mod_path, cls_name = entry
+    try:
+        mod = importlib.import_module(mod_path)
+        return getattr(mod, cls_name)
+    except Exception:
+        return None
+
+
+def _run_checker_on_demand(
+    dir: str,
+    chapter_key: str,
+    sentence_hash: str,
+    checker_name: str,
+    original_text: str,
+    raw_transcription: str,
+    cache_row_dict: Optional[dict],
+) -> Optional[bool]:
+    """Instantiate a single checker and run it against cached transcription.
+
+    Returns True (passed), False (failed), or None if the checker cannot run.
+    """
+    from audiobook_generator.core.audio_checkers.base_audio_chunk_checker import (
+        AUDIO_CHECKER_REGISTRY,
+    )
+    import importlib
+
+    entry = AUDIO_CHECKER_REGISTRY.get(checker_name)
+    if not entry:
+        return None
+
+    cfg = _get_effective_cfg()
+    if cfg is None:
+        return None
+
+    mod_path, cls_name = entry
+    try:
+        mod = importlib.import_module(mod_path)
+        cls = getattr(mod, cls_name)
+        checker = cls(cfg)
+    except Exception as exc:
+        print(f"[review_server] cannot load checker {checker_name!r}: {exc}")
+        return None
+
+    audio_path = _find_chunk_path(dir, chapter_key, sentence_hash)
+    audio_file = Path(audio_path) if audio_path else Path(f"/nonexistent/{sentence_hash}")
+
+    try:
+        result = checker.check(audio_file, original_text, raw_transcription, cache_row_dict)
+        return not result.disputed
+    except Exception as exc:
+        print(f"[review_server] on-demand checker {checker_name!r} error: {exc}")
+        return None
+
+
+@app.get("/api/chunk_check_details")
+async def get_chunk_check_details(dir: str, chapter_key: str, hash: str):
+    """Return per-checker pass/fail results for a single chunk.
+
+    For each checker configured in ``audio_check_checkers``:
+    - Reads the dedicated ``checker_<name>_passed`` column from DB.
+    - If the column is NULL, derives the result from existing score columns
+      (``similarity`` for *whisper_similarity*, ``reference_check_score`` for
+      *reference*) or, when transcription is cached, runs the checker on-demand.
+    - Stores freshly-computed results back into the DB for future fast reads.
+
+    Returns::
+
+        {
+          "checker_results": {
+            "<checker_name>": {"passed": true|false|null, "score": float|null}
+          }
+        }
+    """
+    db_path = _audio_db_path(dir)
+    if not Path(db_path).exists():
+        return {"checker_results": {}}
+
+    store = AudioChunkStore(db_path)
+    checker_names = _get_configured_checker_names()
+
+    cache_row = store.get_chunk_cache_full_row(chapter_key, hash)
+    if not cache_row:
+        return {"checker_results": {}}
+
+    cfg = _get_effective_cfg()
+
+    # Convert sqlite3.Row to plain dict once
+    cache_dict: dict = dict(cache_row)
+
+    # Resolve raw transcription for on-demand checker execution
+    raw_trans: Optional[str] = cache_dict.get("raw_transcription") or None
+    if not raw_trans:
+        fallback = (cache_dict.get("transcription") or "").strip()
+        if fallback and not fallback.startswith("[manual]"):
+            raw_trans = fallback
+
+    final: dict[str, dict] = {}
+    for name in checker_names:
+        checker_cls = _get_checker_class(name)
+        if checker_cls is None:
+            final[name] = {"passed": None, "score": None}
+            continue
+
+        # Each checker class knows how to derive pass/fail from its own columns.
+        passed: Optional[bool] = checker_cls.evaluate_from_row(cache_dict, cfg)
+        score: Optional[float] = checker_cls.score_from_row(cache_dict, cfg)
+
+        # If still undetermined and a transcription is cached, run on-demand.
+        if passed is None and raw_trans:
+            original_text = cache_dict.get("original_text") or ""
+            if original_text:
+                computed = _run_checker_on_demand(
+                    dir, chapter_key, hash, name, original_text, raw_trans, cache_dict
+                )
+                if computed is not None:
+                    passed = computed
+                    # Persist only for checkers that use the fallback column
+                    # (whisper_similarity and reference derive from own columns).
+                    if checker_cls.uses_fallback_passed_column:
+                        store.save_checker_result(chapter_key, hash, name, passed)
+
+        final[name] = {"passed": passed, "score": score}
+
+    return {"checker_results": final}
 
 
 @app.get("/api/disputed")
@@ -602,28 +785,47 @@ async def get_disputed(dir: str, chapter_key: str, threshold: float = 0.70):
     """Return chunks whose main status is ``disputed``.
 
     *threshold* is accepted for backward compatibility but intentionally ignored.
+
+    Each row now includes ``checker_results``: a dict mapping checker name to
+    ``{"passed": bool|null}`` computed via ``evaluate_from_row``.  This lets the
+    UI filter the disputed list by which checker(s) flagged each chunk.
     """
     db_path = _audio_db_path(dir)
     if not Path(db_path).exists():
         return []
     store = AudioChunkStore(db_path)
     rows = store.get_disputed_chunks(chapter_key, threshold=threshold)
-    return [
-        {
-            "hash": r["sentence_hash"],
-            "original_text": r["original_text"],
-            "transcription": r["transcription"],
-            "similarity": r["similarity"],
-            "reference_check_score": r["reference_check_score"],
-            "reference_check_threshold": r["reference_check_threshold"],
-            "reference_check_status": r["reference_check_status"],
-            "reference_check_payload": r["reference_check_payload"],
-            "checked_at": r["checked_at"],
-            "status": r["status"],
-            "resolved": False,  # resolved rows are excluded by the dynamic query
-        }
-        for r in rows
-    ]
+    cfg = _get_effective_cfg()
+    checker_names = _get_configured_checker_names()
+    checker_classes = [(n, _get_checker_class(n)) for n in checker_names]
+    result = []
+    for r in rows:
+        checker_results = {}
+        for name, cls in checker_classes:
+            if cls is None:
+                continue
+            try:
+                passed = cls.evaluate_from_row(r, cfg)
+            except Exception:
+                passed = None
+            checker_results[name] = {"passed": passed}
+        result.append(
+            {
+                "hash": r["sentence_hash"],
+                "original_text": r["original_text"],
+                "transcription": r["transcription"],
+                "similarity": r["similarity"],
+                "reference_check_score": r["reference_check_score"],
+                "reference_check_threshold": r["reference_check_threshold"],
+                "reference_check_status": r["reference_check_status"],
+                "reference_check_payload": r["reference_check_payload"],
+                "checked_at": r["checked_at"],
+                "status": r["status"],
+                "resolved": False,  # resolved rows are excluded by the dynamic query
+                "checker_results": checker_results,
+            }
+        )
+    return result
 
 
 class ResolveDisputedRequest(BaseModel):

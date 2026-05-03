@@ -44,8 +44,6 @@ def similarity(a: str, b: str) -> float:
 
 _CYRILLIC_RE = re.compile(r"[а-яё]", re.IGNORECASE)
 _BOUNDARY_WORD_RE = re.compile(r"\w+", re.UNICODE)
-_MORPH_ANALYZER = None
-_MORPH_UNAVAILABLE = False
 _BOUNDARY_SOFTENER_VOWELS_RE = re.compile(r"[ьъ](?=[аеёиоуыэюя])")
 _BOUNDARY_IOTATED_E_RE = re.compile(r"(^|[аеёиоуыэюя])и(?=е)")
 _BOUNDARY_CONSONANTS = frozenset("бвгджзйклмнпрстфхцчшщ")
@@ -70,19 +68,17 @@ _BOUNDARY_INITIAL_CANONICAL = {
 
 
 def _get_morph_analyzer():
-    """Lazily create a shared pymorphy3 analyzer for Russian word-form checks."""
-    global _MORPH_ANALYZER, _MORPH_UNAVAILABLE
-    if _MORPH_ANALYZER is not None:
-        return _MORPH_ANALYZER
-    if _MORPH_UNAVAILABLE:
-        return None
+    """Return the shared pymorphy3 analyzer from the module-level cache.
+
+    Delegates to :func:`audiobook_generator.normalizers.pymorphy_cache.get_morph_analyzer`
+    so that all callers across the project share a single ``MorphAnalyzer`` instance
+    rather than each loading the heavy dictionary files independently.
+    """
     try:
-        from pymorphy3 import MorphAnalyzer
-        _MORPH_ANALYZER = MorphAnalyzer()
-        return _MORPH_ANALYZER
+        from audiobook_generator.normalizers.pymorphy_cache import get_morph_analyzer
+        return get_morph_analyzer()
     except Exception as exc:
         logger.debug("pymorphy3 unavailable for boundary checks: %s", exc)
-        _MORPH_UNAVAILABLE = True
         return None
 
 
@@ -294,12 +290,71 @@ class BaseAudioChunkChecker:
 
     Constructor always receives the application ``config`` object so every
     checker can read its own settings without extra plumbing.
+
+    Two class-level hooks let the Review UI server derive pass/fail without
+    re-running the checker:
+
+    ``uses_fallback_passed_column``
+        When ``True`` (default) the checker has no dedicated DB column and
+        ``audio_checker.py`` stores its result in a generic
+        ``checker_<name>_passed`` fallback column after each run.
+        Set to ``False`` for checkers whose result is already encoded in
+        their own existing ``chunk_cache`` columns (e.g. *whisper_similarity*
+        uses the ``similarity`` column).
+
+    ``evaluate_from_row(row, config)``
+        Called by the Review UI to get pass/fail from a cached DB row without
+        re-running the checker.  Returns ``None`` when the row doesn't contain
+        enough data.
+
+    ``score_from_row(row, config)``
+        Returns the numeric metric for display (e.g. similarity score).
+        Returns ``None`` for binary-only checkers.
     """
 
     name: str = ""
 
+    #: When True the checker relies on a generic ``checker_<name>_passed``
+    #: fallback column written by AudioChecker after every run.
+    #: Checkers that store results in their own dedicated columns set this
+    #: to False so the fallback column is never written or read.
+    uses_fallback_passed_column: bool = True
+
     def __init__(self, config):
         self.config = config
+
+    # ------------------------------------------------------------------
+    # Per-row evaluation (called by Review UI without re-running the checker)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def evaluate_from_row(cls, row: dict, config) -> Optional[bool]:
+        """Derive pass/fail for this checker from an existing ``chunk_cache`` row.
+
+        Called by the Review UI server to determine the checker's verdict
+        without re-running it.  Returns ``None`` when the row does not contain
+        enough data to make a determination.
+
+        Default: reads the generic ``checker_<name>_passed`` fallback column
+        (``1`` = passed, ``0`` = failed, absent / NULL = unknown).
+        Subclasses with their own dedicated column(s) override this.
+        """
+        col = f"checker_{cls.name}_passed"
+        val = row.get(col)
+        if val is None:
+            return None
+        return val == 1
+
+    @classmethod
+    def score_from_row(cls, row: dict, config) -> Optional[float]:
+        """Return the stored numeric score for display, or ``None``.
+
+        Returns ``None`` for checkers that produce only a binary verdict.
+        Subclasses with a numeric metric (e.g. similarity ratio) override this.
+        """
+        return None
+
+    # ------------------------------------------------------------------
 
     def check(
         self,
