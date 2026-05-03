@@ -352,12 +352,14 @@ class NormalizerLLMChoiceService:
         self,
         *,
         system_prompt: str = DEFAULT_CHOICE_SYSTEM_PROMPT,
+        model: str | None = None,
     ) -> str:
         settings = {
             "provider": self.llm.settings.provider,
-            "model": self.llm.settings.model,
+            "model": model or self.llm.settings.model,
             "base_url": self.llm.settings.base_url or "",
             "max_chars": self.llm.settings.max_chars,
+            "reasoning_effort": self.llm.settings.reasoning_effort,
             "choice_system_prompt": system_prompt,
             "choice_cache_path": self.llm.settings.choice_cache_path,
             "choice_cache_version": CHOICE_CACHE_VERSION,

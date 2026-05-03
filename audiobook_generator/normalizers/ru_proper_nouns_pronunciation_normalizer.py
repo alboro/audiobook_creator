@@ -414,6 +414,7 @@ class ProperNounsPronunciationRuNormalizer(BaseNormalizer):
             "00_choice_system_prompt.txt": PROPER_NOUN_CHOICE_SYSTEM_PROMPT,
             "01_choice_settings.json": self.choice_service.render_settings_json(
                 system_prompt=PROPER_NOUN_CHOICE_SYSTEM_PROMPT,
+                model=self.get_normalizer_model(),
             ),
             "02_candidates.json": json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         }

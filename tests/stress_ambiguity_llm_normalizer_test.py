@@ -240,8 +240,11 @@ class TestStressAmbiguityWithSyntheticDb(unittest.TestCase):
         self.assertGreaterEqual(len(units), 1)
         all_source_texts = []
         for unit in units:
-            payload = json.loads(unit)
-            all_source_texts.extend(item["source_text"].lower() for item in payload["items"])
+            data = json.loads(unit)
+            for entry in data["index"]:
+                candidate = self.normalizer._planned_candidates.get(entry["item_id"])
+                if candidate:
+                    all_source_texts.append(candidate.source_text.lower())
         self.assertIn("тела", all_source_texts)
 
     def test_plan_units_tela_item_has_both_stress_variants(self):
@@ -249,10 +252,11 @@ class TestStressAmbiguityWithSyntheticDb(unittest.TestCase):
         units = self.normalizer.plan_processing_units(text)
         option_texts: list[str] = []
         for unit in units:
-            payload = json.loads(unit)
-            for item in payload["items"]:
-                if item["source_text"].lower() == "тела":
-                    option_texts.extend(opt["text"] for opt in item["options"])
+            data = json.loads(unit)
+            for entry in data["index"]:
+                candidate = self.normalizer._planned_candidates.get(entry["item_id"])
+                if candidate and candidate.source_text.lower() == "тела":
+                    option_texts.extend(opt.text for opt in candidate.options)
         self.assertIn(TELA_GEN, option_texts, f"тЕла не в опциях LLM-пакета: {option_texts}")
         self.assertIn(TELA_ACC, option_texts, f"телА не в опциях LLM-пакета: {option_texts}")
 
@@ -262,44 +266,49 @@ class TestStressAmbiguityWithSyntheticDb(unittest.TestCase):
 
     def _plan_and_apply(self, text: str, override_option_id: str | None = None) -> str:
         """
-        Plan → build a hand-crafted fake LLM response → merge.
+        Plan → build a hand-crafted fake LLM response (N.K lines) → merge.
 
         If override_option_id is given, force that option for «тела»;
-        all other words get «original».
+        all other words get no line (fallback to «original»).
         """
         units = self.normalizer.plan_processing_units(text)
         self.assertGreaterEqual(len(units), 1, "plan_processing_units returned no units")
 
+        # Build item_id → {option_id → "N.K"} from stored indices
+        nk_map: dict[str, dict[str, str]] = {}
+        for index in self.normalizer._planned_indices:
+            for entry in index:
+                item_id = entry["item_id"]
+                nk_map[item_id] = {
+                    option_id: f"{entry['num']}.{k}"
+                    for k, option_id in entry["options"].items()
+                    if k != "0"
+                }
+
         fake_processed: list[str] = []
         for unit in units:
-            payload = json.loads(unit)
-            selections = []
-            for item in payload["items"]:
-                if override_option_id and item["source_text"].lower() == "тела":
-                    opt_id = override_option_id
-                else:
-                    opt_id = "original"
-                selections.append({
-                    "id": item["id"],
-                    "option_id": opt_id,
-                    "custom_text": "",
-                    "cacheable": False,
-                    "reason": "test",
-                })
-            fake_processed.append(json.dumps({"selections": selections}))
+            data = json.loads(unit)
+            lines: list[str] = []
+            for entry in data["index"]:
+                item_id = entry["item_id"]
+                candidate = self.normalizer._planned_candidates.get(item_id)
+                if override_option_id and candidate and candidate.source_text.lower() == "тела":
+                    nk = nk_map.get(item_id, {}).get(override_option_id)
+                    if nk:
+                        lines.append(nk)
+                # else: omitted → merge will apply "original" fallback
+            fake_processed.append("\n".join(lines))
 
         return self.normalizer.merge_processed_units(fake_processed)
 
     def _variant_option_id_for(self, text: str, spoken_form: str) -> str:
         """Return the option_id that corresponds to *spoken_form* in the тела item."""
-        units = self.normalizer.plan_processing_units(text)
-        for unit in units:
-            payload = json.loads(unit)
-            for item in payload["items"]:
-                if item["source_text"].lower() == "тела":
-                    for opt in item["options"]:
-                        if opt["text"] == spoken_form:
-                            return opt["id"]
+        self.normalizer.plan_processing_units(text)
+        for candidate in self.normalizer._planned_candidates.values():
+            if candidate.source_text.lower() == "тела":
+                for opt in candidate.options:
+                    if opt.text == spoken_form:
+                        return opt.option_id
         raise AssertionError(f"Option {spoken_form!r} not found in any unit")
 
     def test_merge_applies_te_la_stress_when_chosen(self):
@@ -636,8 +645,11 @@ class TestStressAmbiguitySamomu(unittest.TestCase):
         self.assertGreaterEqual(len(units), 1)
         all_source_texts = []
         for unit in units:
-            payload = json.loads(unit)
-            all_source_texts.extend(item["source_text"].lower() for item in payload["items"])
+            data = json.loads(unit)
+            for entry in data["index"]:
+                candidate = self.normalizer._planned_candidates.get(entry["item_id"])
+                if candidate:
+                    all_source_texts.append(candidate.source_text.lower())
         self.assertIn(
             "самому", all_source_texts,
             f"«самому» не попало в пакет LLM. Найдено: {all_source_texts}",
@@ -647,10 +659,11 @@ class TestStressAmbiguitySamomu(unittest.TestCase):
         units = self.normalizer.plan_processing_units(SAMOMU_SENTENCE)
         option_texts: list[str] = []
         for unit in units:
-            payload = json.loads(unit)
-            for item in payload["items"]:
-                if item["source_text"].lower() == "самому":
-                    option_texts.extend(opt["text"] for opt in item["options"])
+            data = json.loads(unit)
+            for entry in data["index"]:
+                candidate = self.normalizer._planned_candidates.get(entry["item_id"])
+                if candidate and candidate.source_text.lower() == "самому":
+                    option_texts.extend(opt.text for opt in candidate.options)
         self.assertIn(SAMOMU_SAMYJ, option_texts, f"са́мому не в опциях LLM-пакета: {option_texts}")
         self.assertIn(SAMOMU_SAM,   option_texts, f"самому́ не в опциях LLM-пакета: {option_texts}")
 
@@ -659,14 +672,12 @@ class TestStressAmbiguitySamomu(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def _variant_option_id_for_samomu(self, spoken_form: str) -> str:
-        units = self.normalizer.plan_processing_units(SAMOMU_SENTENCE)
-        for unit in units:
-            payload = json.loads(unit)
-            for item in payload["items"]:
-                if item["source_text"].lower() == "самому":
-                    for opt in item["options"]:
-                        if opt["text"] == spoken_form:
-                            return opt["id"]
+        self.normalizer.plan_processing_units(SAMOMU_SENTENCE)
+        for candidate in self.normalizer._planned_candidates.values():
+            if candidate.source_text.lower() == "самому":
+                for opt in candidate.options:
+                    if opt.text == spoken_form:
+                        return opt.option_id
         raise AssertionError(f"Option {spoken_form!r} not found for «самому»")
 
     def _plan_and_apply_samomu(self, override_spoken_form: str | None = None) -> str:
@@ -675,23 +686,30 @@ class TestStressAmbiguitySamomu(unittest.TestCase):
             self._variant_option_id_for_samomu(override_spoken_form)
             if override_spoken_form else None
         )
+
+        # Build item_id → {option_id → "N.K"} from stored indices
+        nk_map: dict[str, dict[str, str]] = {}
+        for index in self.normalizer._planned_indices:
+            for entry in index:
+                item_id = entry["item_id"]
+                nk_map[item_id] = {
+                    option_id: f"{entry['num']}.{k}"
+                    for k, option_id in entry["options"].items()
+                    if k != "0"
+                }
+
         fake_processed: list[str] = []
         for unit in units:
-            payload = json.loads(unit)
-            selections = []
-            for item in payload["items"]:
-                if opt_id_override and item["source_text"].lower() == "самому":
-                    opt_id = opt_id_override
-                else:
-                    opt_id = "original"
-                selections.append({
-                    "id": item["id"],
-                    "option_id": opt_id,
-                    "custom_text": "",
-                    "cacheable": False,
-                    "reason": "test",
-                })
-            fake_processed.append(json.dumps({"selections": selections}))
+            data = json.loads(unit)
+            lines: list[str] = []
+            for entry in data["index"]:
+                item_id = entry["item_id"]
+                candidate = self.normalizer._planned_candidates.get(item_id)
+                if opt_id_override and candidate and candidate.source_text.lower() == "самому":
+                    nk = nk_map.get(item_id, {}).get(opt_id_override)
+                    if nk:
+                        lines.append(nk)
+            fake_processed.append("\n".join(lines))
         return self.normalizer.merge_processed_units(fake_processed)
 
     def test_merge_applies_sam_stress_when_chosen(self):

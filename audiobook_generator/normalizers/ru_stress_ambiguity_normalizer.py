@@ -79,7 +79,7 @@ class StressAmbiguityCandidate:
 
 class StressAmbiguityLLMNormalizer(BaseNormalizer):
     STEP_NAME = "ru_llm_stress_ambiguity"
-    STEP_VERSION = 4
+    STEP_VERSION = 5
 
     def __init__(self, config: GeneralConfig):
         if is_russian_language(config.language):
@@ -91,6 +91,7 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
         self._planned_text = ""
         self._planned_candidates: dict[str, StressAmbiguityCandidate] = {}
         self._planned_order: list[str] = []
+        self._planned_indices: list[list[dict]] = []   # per-batch N-index, populated by plan_processing_units
         self._last_selections: dict[str, NormalizerLLMChoiceSelection] = {}
         super().__init__(config)
         self.choice_service = NormalizerLLMChoiceService(self.get_normalizer_llm())
@@ -155,11 +156,13 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
             self._planned_text = text
             self._planned_candidates = {}
             self._planned_order = []
+            self._planned_indices = []
             return []
         if not is_russian_language(self.config.language):
             self._planned_text = text
             self._planned_candidates = {}
             self._planned_order = []
+            self._planned_indices = []
             return []
 
         candidates = self._collect_candidates(text)
@@ -171,7 +174,13 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
             [candidate.to_choice_item() for candidate in candidates],
             system_prompt=_get_stress_ambiguity_prompt(self.config),
         )
-        return [self._serialize_batch(batch) for batch in batches]
+        units: list[str] = []
+        self._planned_indices = []
+        for batch in batches:
+            prompt_text, index = self._render_compact_prompt(batch)
+            self._planned_indices.append(index)
+            units.append(json.dumps({"prompt": prompt_text, "index": index}, ensure_ascii=False))
+        return units
 
     def process_unit(
         self,
@@ -181,56 +190,19 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
         unit_index: int,
         unit_count: int,
     ) -> str:
-        batch = self._deserialize_batch(unit)
+        data = json.loads(unit)
+        prompt_text = data["prompt"]
         logger.info(
-            "Choosing stress ambiguities for chapter '%s' batch %s/%s, items=%s",
+            "Choosing stress ambiguities for chapter '%s' batch %s/%s",
             chapter_title,
             unit_index,
             unit_count,
-            len(batch),
         )
-
-        # Render compact inline prompt and send to LLM
-        prompt_text, index = self._render_compact_prompt(batch)
-        response_text = self.choice_service.llm.complete(
+        return self.choice_service.llm.complete(
             user_prompt=prompt_text,
             system_prompt=_get_stress_ambiguity_prompt(self.config),
             model=self.get_normalizer_model(),
             temperature=0,
-        )
-
-        # Parse N.K response lines
-        selections = self._parse_compact_response(response_text, index)
-
-        # Fill fallbacks for items LLM skipped
-        for entry in index:
-            if entry["item_id"] not in selections:
-                selections[entry["item_id"]] = NormalizerLLMChoiceSelection(
-                    item_id=entry["item_id"],
-                    option_id="original",
-                    source="fallback",
-                )
-
-        normalized_selections = {
-            item_id: self._coerce_selection(item_id, selection)
-            for item_id, selection in selections.items()
-        }
-        return json.dumps(
-            {
-                "selections": [
-                    {
-                        "id": item_id,
-                        "option_id": selection.option_id,
-                        "custom_text": selection.custom_text or "",
-                        "cacheable": bool(selection.cacheable),
-                        "reason": selection.reason or "",
-                        "source": selection.source,
-                    }
-                    for item_id, selection in normalized_selections.items()
-                ]
-            },
-            ensure_ascii=False,
-            indent=2,
         )
 
     def merge_processed_units(
@@ -243,10 +215,20 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
             return self._planned_text
 
         selections: dict[str, NormalizerLLMChoiceSelection] = {}
-        for processed in processed_units:
-            if not processed.strip():
+        for i, raw_response in enumerate(processed_units):
+            if not raw_response.strip():
                 continue
-            selections.update(self.choice_service.parse_choice_response_objects(processed))
+            index = self._planned_indices[i] if i < len(self._planned_indices) else []
+            selections.update(self._parse_compact_response(raw_response, index))
+
+        # Fill fallbacks for items the LLM skipped
+        for item_id in self._planned_order:
+            if item_id not in selections:
+                selections[item_id] = NormalizerLLMChoiceSelection(
+                    item_id=item_id,
+                    option_id="original",
+                    source="fallback",
+                )
 
         normalized = self._planned_text
         replacements = 0
@@ -301,6 +283,7 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
             "00_choice_system_prompt.txt": _get_stress_ambiguity_prompt(self.config),
             "01_choice_settings.json": self.choice_service.render_settings_json(
                 system_prompt=_get_stress_ambiguity_prompt(self.config),
+                model=self.get_normalizer_model(),
             ),
             "02_candidates.json": json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
             "03_pronunciation_lexicon.json": json.dumps(
@@ -424,11 +407,10 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
         unit_index: int,
         unit_count: int,
     ) -> dict[str, str]:
-        batch = self._deserialize_batch(unit)
-        prompt_text, _ = self._render_compact_prompt(batch)
+        data = json.loads(unit)
         return {
             "00_choice_system_prompt.txt": _get_stress_ambiguity_prompt(self.config),
-            "01_choice_user_prompt.txt": prompt_text,
+            "input.txt": data["prompt"],
         }
 
     def _collect_candidates(self, text: str) -> list[StressAmbiguityCandidate]:
@@ -523,6 +505,10 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
                 preserve_case(strip_combining_acute(source_text), spoken_form)
             )
             if not preserved or preserved in seen_texts:
+                continue
+            # Discard variants that are capitalised when the source starts lowercase —
+            # these come from proper-name entries (e.g. "Ве́ры" for lowercase "веры").
+            if source_text and source_text[0].islower() and preserved[0].isupper():
                 continue
 
             # Compose a compact grammatical hint for the LLM
@@ -648,64 +634,6 @@ class StressAmbiguityLLMNormalizer(BaseNormalizer):
             if option.option_id == selection.resolved_option_id():
                 return option.text
         return candidate.source_text
-
-    @staticmethod
-    def _serialize_batch(batch: list[NormalizerLLMChoiceItem]) -> str:
-        return json.dumps(
-            {
-                "items": [
-                    {
-                        "id": item.item_id,
-                        "source_text": item.source_text,
-                        "context": item.context,
-                        "note": item.note or "",
-                        "options": [
-                            {
-                                "id": option.option_id,
-                                "text": option.text,
-                                **({"hint": option.hint} if option.hint else {}),
-                            }
-                            for option in item.options
-                        ],
-                    }
-                    for item in batch
-                ]
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    @staticmethod
-    def _deserialize_batch(serialized_batch: str) -> list[NormalizerLLMChoiceItem]:
-        payload = json.loads(serialized_batch)
-        items: list[NormalizerLLMChoiceItem] = []
-        for raw_item in payload.get("items", []):
-            items.append(
-                NormalizerLLMChoiceItem(
-                    item_id=raw_item["id"],
-                    source_text=raw_item["source_text"],
-                    context=raw_item["context"],
-                    note=raw_item.get("note") or None,
-                    options=tuple(
-                        NormalizerLLMChoiceOption(
-                            option_id=raw_option["id"],
-                            text=raw_option["text"],
-                            hint=raw_option.get("hint") or None,
-                        )
-                        for raw_option in raw_item.get("options", [])
-                    ),
-                )
-            )
-        return items
-
-    @staticmethod
-    def _coerce_selection(
-        item_id: str,
-        selection: NormalizerLLMChoiceSelection | str,
-    ) -> NormalizerLLMChoiceSelection:
-        if isinstance(selection, NormalizerLLMChoiceSelection):
-            return selection
-        return NormalizerLLMChoiceSelection(item_id=item_id, option_id=str(selection))
 
     @staticmethod
     def _load_built_sources(lexicon_db: PronunciationLexiconDB | None) -> list[str]:
