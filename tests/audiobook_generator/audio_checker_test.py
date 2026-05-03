@@ -12,14 +12,22 @@ from audiobook_generator.core.audio_checker import (
     _normalize_for_compare,
     _build_pre_compare_normalizer,
 )
+from audiobook_generator.core.audio_checkers.base_audio_chunk_checker import (
+    words_match_for_boundary,
+)
+from audiobook_generator.core.audio_checkers.first_word_checker import FirstWordChecker
+from audiobook_generator.core.audio_checkers.last_word_checker import LastWordChecker
+from audiobook_generator.core.audio_checkers.whisper_similarity_checker import WhisperSimilarityChecker
 from audiobook_generator.core.audio_chunk_store import AudioChunkStore
 
 
-def test_check_one_file_reuses_fresh_cached_raw_transcription():
+def test_check_one_file_rechecks_already_checked_chunk_with_fresh_cache():
+    """A fresh cached 'checked' chunk is re-evaluated against the current checker set."""
     with tempfile.TemporaryDirectory() as tmp:
         output_dir = Path(tmp)
         audio_path = output_dir / "wav" / "chunks" / "0001_Test" / "hash_cached.wav"
         audio_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write audio FIRST, then save to DB so checked_at >= audio mtime
         audio_path.write_bytes(b"fake wav")
 
         store = AudioChunkStore(output_dir / "wav" / "_state" / "audio_chunks.sqlite3")
@@ -53,68 +61,215 @@ def test_check_one_file_reuses_fresh_cached_raw_transcription():
             counters,
         )
 
+        # Fresh cached raw transcription is reused, but the chunk is still re-checked.
         assert transcribe_called is False
         assert counters == {"checked": 1, "disputed": 0, "skipped": 0}
 
 
-def test_check_one_file_runs_reference_check_when_transcription_is_cached():
+def test_check_one_file_rechecks_already_disputed_chunk_with_fresh_cache():
+    """A fresh cached 'disputed' chunk is re-evaluated and may become checked."""
     with tempfile.TemporaryDirectory() as tmp:
         output_dir = Path(tmp)
-        audio_path = output_dir / "wav" / "chunks" / "0001_Test" / "hash_cached.wav"
+        audio_path = output_dir / "wav" / "chunks" / "0001_Test" / "hash_disp.wav"
         audio_path.parent.mkdir(parents=True, exist_ok=True)
         audio_path.write_bytes(b"fake wav")
 
         store = AudioChunkStore(output_dir / "wav" / "_state" / "audio_chunks.sqlite3")
-        store.save_checked_chunk(
+        store.save_disputed_chunk(
             "0001_Test",
-            "hash_cached",
-            "Приве́т, мир.",
+            "hash_disp",
+            "Привет, мир.",
             "Привет мир",
-            0.99,
-            raw_transcription="Привет мир",
+            0.3,
         )
 
         checker = AudioChecker(output_folder=output_dir, threshold=0.5)
-        checker._pre_compare = None
-        checker._reference_check_command = "dummy-auditor"
-        checker._reference_check_threshold = 0.85
         transcribe_called = False
-        reference_called = False
 
         def fake_transcribe(_path):
             nonlocal transcribe_called
             transcribe_called = True
             return "не должно вызываться"
 
-        def fake_reference_check(_audio_file, original_text):
-            nonlocal reference_called
-            reference_called = True
-            assert original_text == "Приве́т, мир."
-            return {
-                "status": "ok",
-                "score": 0.12,
-                "threshold": 0.85,
-                "payload": {"score": 0.12},
-            }
-
         checker._transcribe = fake_transcribe
-        checker._run_reference_check = fake_reference_check
         counters = {"checked": 0, "disputed": 0, "skipped": 0}
 
         checker._check_one_file(
-            audio_path,
+            audio_path, "0001_Test", "hash_disp", "Привет, мир.", store, counters,
+        )
+        assert transcribe_called is False
+        assert counters == {"checked": 1, "disputed": 0, "skipped": 0}
+        row = store.get_cached_transcription_entry("0001_Test", "hash_disp")
+        assert row is not None
+        assert row["status"] == "checked"
+
+
+def test_check_one_file_skips_resolved_chunk_with_fresh_cache():
+    """A fresh cached 'resolved' chunk is treated as a manual final verdict and skipped."""
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        audio_path = output_dir / "wav" / "chunks" / "0001_Test" / "hash_resolved.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"fake wav")
+
+        store = AudioChunkStore(output_dir / "wav" / "_state" / "audio_chunks.sqlite3")
+        store.save_disputed_chunk(
             "0001_Test",
-            "hash_cached",
-            "Приве́т, мир.",
-            store,
-            counters,
+            "hash_resolved",
+            "Привет, мир.",
+            "Привет мир",
+            0.3,
+        )
+        store.resolve_disputed_chunk("0001_Test", "hash_resolved")
+
+        checker = AudioChecker(output_folder=output_dir, threshold=0.5)
+        transcribe_called = False
+
+        def fake_transcribe(_path):
+            nonlocal transcribe_called
+            transcribe_called = True
+            return "не должно вызываться"
+
+        checker._transcribe = fake_transcribe
+        counters = {"checked": 0, "disputed": 0, "skipped": 0}
+
+        checker._check_one_file(
+            audio_path, "0001_Test", "hash_resolved", "Привет, мир.", store, counters,
         )
 
         assert transcribe_called is False
+        assert counters == {"checked": 0, "disputed": 0, "skipped": 1}
+
+
+def test_check_one_file_force_rechecks_resolved_chunk_and_overwrites_status():
+    """force=True must re-check a fresh resolved chunk and rewrite its stored status."""
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        audio_path = output_dir / "wav" / "chunks" / "0001_Test" / "hash_force_resolved.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"fake wav")
+
+        store = AudioChunkStore(output_dir / "wav" / "_state" / "audio_chunks.sqlite3")
+        store.save_disputed_chunk(
+            "0001_Test",
+            "hash_force_resolved",
+            "Привет, мир.",
+            "Привет мир",
+            0.3,
+        )
+        store.resolve_disputed_chunk("0001_Test", "hash_force_resolved")
+
+        checker = AudioChecker(
+            output_folder=output_dir,
+            threshold=0.5,
+            config=SimpleNamespace(audio_check_force=True),
+        )
+        transcribe_called = False
+
+        def fake_transcribe(_path):
+            nonlocal transcribe_called
+            transcribe_called = True
+            return "не должно вызываться"
+
+        checker._transcribe = fake_transcribe
+        counters = {"checked": 0, "disputed": 0, "skipped": 0}
+
+        checker._check_one_file(
+            audio_path, "0001_Test", "hash_force_resolved", "Привет, мир.", store, counters,
+        )
+
+        assert transcribe_called is False
+        assert counters == {"checked": 1, "disputed": 0, "skipped": 0}
+        row = store.get_cached_transcription_entry("0001_Test", "hash_force_resolved")
+        assert row is not None
+        assert row["status"] == "checked"
+
+
+def test_check_one_file_rechecks_when_audio_is_newer():
+    """If audio mtime is newer than checked_at, re-check even if status='checked'."""
+    import time
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        audio_path = output_dir / "wav" / "chunks" / "0001_Test" / "hash_new.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+
+        store = AudioChunkStore(output_dir / "wav" / "_state" / "audio_chunks.sqlite3")
+        # Save to DB first (checked_at = now, T0)
+        store.save_checked_chunk("0001_Test", "hash_new", "Привет.", "Привет", 0.99)
+
+        # Then write audio (mtime = T1 > T0)
+        time.sleep(0.01)
+        audio_path.write_bytes(b"fake wav")
+
+        checker = AudioChecker(output_folder=output_dir, threshold=0.5)
+        checker._pre_compare = None
+        checker._transcribe = lambda _path: "Привет"
+        counters = {"checked": 0, "disputed": 0, "skipped": 0}
+
+        checker._check_one_file(
+            audio_path, "0001_Test", "hash_new", "Привет.", store, counters,
+        )
+        # Audio is newer → re-checked, not skipped
+        assert counters["checked"] == 1
+        assert counters["skipped"] == 0
+
+
+def test_check_one_file_runs_all_checkers_for_new_chunk():
+    """A chunk with no prior DB entry runs the full checker pipeline including reference."""
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        audio_path = output_dir / "wav" / "chunks" / "0001_Test" / "hash_new.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"fake wav")
+
+        from audiobook_generator.core.audio_checkers import CheckResult
+        from audiobook_generator.core.audio_checkers.reference_checker import ReferenceChecker
+
+        cfg = SimpleNamespace(
+            audio_check_checkers="whisper_similarity,reference",
+            audio_check_threshold=0.5,
+            audio_reference_check_command="dummy-auditor",
+            audio_reference_check_threshold=0.85,
+            audio_reference_check_timeout=5,
+            audio_reference_check_cache_dir=None,
+            audio_reference_check_stress="preserve",
+            language="ru",
+            output_folder=str(output_dir),
+            ffmpeg_path=None,
+            prepared_text_folder=None,
+        )
+
+        store = AudioChunkStore(output_dir / "wav" / "_state" / "audio_chunks.sqlite3")
+        checker = AudioChecker(output_folder=output_dir, threshold=0.5, config=cfg)
+        checker._pre_compare = None
+        checker._transcribe = lambda _path: "Привет мир"
+
+        reference_called = False
+
+        def fake_reference_check(audio_file, original_text, transcription, cache_row):
+            nonlocal reference_called
+            reference_called = True
+            return CheckResult(
+                disputed=False,
+                reference_check_score=0.12,
+                reference_check_threshold=0.85,
+                reference_check_status="ok",
+                reference_check_payload={"score": 0.12},
+            )
+
+        for c in checker._checkers:
+            if isinstance(c, ReferenceChecker):
+                c.check = fake_reference_check
+                break
+
+        counters = {"checked": 0, "disputed": 0, "skipped": 0}
+        checker._check_one_file(
+            audio_path, "0001_Test", "hash_new", "Привет мир.", store, counters,
+        )
+
         assert reference_called is True
         assert counters["checked"] == 1
         assert counters["disputed"] == 0
-        assert counters["reference_checked"] == 1
 
 
 def test_audio_check_prepared_text_folder_overrides_auto_run_selection():
@@ -166,6 +321,87 @@ def test_check_one_file_persists_checked_chunk_cache_after_successful_run():
         assert row is not None
         assert row["status"] == "checked"
         assert row["raw_transcription"] == "Привет мир"
+
+
+def test_first_word_checker_accepts_same_lemma_in_different_form():
+    cfg = SimpleNamespace(language="ru-RU", audio_check_threshold=0.94)
+    checker = FirstWordChecker(cfg)
+    result = checker.check(
+        Path("/tmp/fake.wav"),
+        "Вступление редактора с некоторыми результатами недавних исследований!",
+        "вступлении редактора с некоторыми результатами недавних исследований.",
+        None,
+    )
+    assert result.disputed is False
+
+
+def test_first_word_checker_accepts_missing_space_after_original_first_word():
+    cfg = SimpleNamespace(language="ru-RU", audio_check_threshold=0.94)
+    checker = FirstWordChecker(cfg)
+    checker._pre_compare = None
+    result = checker.check(
+        Path("/tmp/fake.wav"),
+        "Под мрачным взглядом Кутона была подавлена публикация.",
+        "Подмрачным взглядом Кутона была подавлена публикация.",
+        None,
+    )
+    assert result.disputed is False
+
+
+def test_last_word_checker_accepts_same_lemma_in_different_form():
+    cfg = SimpleNamespace(language="ru-RU", audio_check_threshold=0.94)
+    checker = LastWordChecker(cfg)
+    result = checker.check(
+        Path("/tmp/fake.wav"),
+        "Мы говорили о недавних исследованиях",
+        "мы говорили о недавних исследовании",
+        None,
+    )
+    assert result.disputed is False
+
+
+def test_last_word_checker_accepts_initial_bp_variant_in_name():
+    cfg = SimpleNamespace(language="ru-RU", audio_check_threshold=0.94)
+    checker = LastWordChecker(cfg)
+    checker._pre_compare = None
+    result = checker.check(
+        Path("/tmp/fake.wav"),
+        "Но обстоятельства привели им на помощь великое англо-американское сердце Томаса Пэйна.",
+        "Но обстоятельства привели им на помощь великое англо-американское сердце Томаса Бейна.",
+        None,
+    )
+    assert result.disputed is False
+
+
+def test_boundary_word_matcher_accepts_phonetic_whisper_variant():
+    assert words_match_for_boundary("Конвеем", "Конвейем") is True
+    assert words_match_for_boundary("те", "тьэ") is True
+    assert words_match_for_boundary("пе", "пэ") is True
+    assert words_match_for_boundary("Пэйна", "Бейна") is True
+    assert words_match_for_boundary("Бог", "бок") is True
+    assert words_match_for_boundary("сдал", "здал") is True
+
+
+def test_boundary_word_matcher_keeps_different_words_distinct():
+    assert words_match_for_boundary("Конвеем", "конвоем") is False
+    assert words_match_for_boundary("дом", "том") is False
+
+
+def test_whisper_similarity_checker_accepts_voicing_variant_in_short_chunk():
+    cfg = SimpleNamespace(language="ru-RU", audio_check_threshold=0.94)
+    checker = WhisperSimilarityChecker(cfg)
+    checker._pre_compare = None
+
+    result = checker.check(
+        Path("/tmp/fake.wav"),
+        "Век разума!",
+        "ВЕГ РАЗУМА",
+        None,
+    )
+
+    assert result.disputed is False
+    assert result.similarity is not None
+    assert result.similarity >= 0.99
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +548,53 @@ class WhisperDigitFalseDisputedTests(unittest.TestCase):
         self.assertEqual(counters["disputed"], 0)
         self.assertEqual(counters["checked"], 1)
 
+    def test_storage_keeps_raw_transcription_but_persists_normalized_form(self):
+        """UI transcription should be compare-ready while raw Whisper text is preserved."""
+        if self._skip:
+            self.skipTest(f"pre_compare normalizer unavailable: {self._skip}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            store = AudioChunkStore(output_dir / "wav" / "_state" / "audio_chunks.sqlite3")
+            audio_path = output_dir / "wav" / "chunks" / "0001" / "hash.wav"
+            audio_path.parent.mkdir(parents=True, exist_ok=True)
+            audio_path.write_bytes(b"fake")
+
+            checker = AudioChecker(output_folder=output_dir, threshold=0.94)
+            checker._pre_compare = self._fn
+            checker._transcribe = lambda _path: "5 августа 1794 года он писал следующее."
+
+            counters = {"checked": 0, "disputed": 0, "skipped": 0}
+            checker._check_one_file(
+                audio_path,
+                "0001",
+                "hash",
+                "пятого августа тысяча семьсот девяносто четвёртого года он писал следующее.",
+                store,
+                counters,
+            )
+
+            row = store.get_cached_transcription_entry("0001", "hash")
+            self.assertIsNotNone(row)
+            self.assertEqual(row["raw_transcription"], "5 августа 1794 года он писал следующее.")
+            self.assertNotIn("1794", row["transcription"])
+            self.assertIn("пятого", _normalize_for_compare(row["transcription"]))
+            self.assertIn("четвертого", _normalize_for_compare(row["transcription"]))
+
+    def test_year_range_title_not_false_disputed(self):
+        """Whisper year range with singular 'год' must normalize close to title wording."""
+        if self._skip:
+            self.skipTest(f"pre_compare normalizer unavailable: {self._skip}")
+
+        original = (
+            "Тысяча семьсот девяносто четвёртый - тысяча семьсот "
+            "девяносто шестой годы: Томас Пэйн."
+        )
+        transcription = "1794-1796 год, Томас Пейн."
+        counters = self._run_one_file(original, transcription, threshold=0.94)
+        self.assertEqual(counters["disputed"], 0, "Year-range title should not be disputed")
+        self.assertEqual(counters["checked"], 1)
+
     def test_without_pre_compare_digits_cause_low_similarity(self):
         """
         Control: WITHOUT pre_compare, digit form vs word form has very low similarity.
@@ -376,6 +659,3 @@ class WhisperDigitFalseDisputedTests(unittest.TestCase):
         norm_before = _normalize_for_compare(text)
         norm_after = _normalize_for_compare(result)
         self.assertEqual(norm_before, norm_after, "pre_compare must not touch plain text")
-
-
-

@@ -328,13 +328,9 @@ class AudioChunkStore:
         reference_check_threshold: float | None = None,
         reference_check_status: str | None = None,
         reference_check_payload: str | None = None,
+        force_status: bool = False,
     ) -> None:
-        """Save a checked chunk (transcription complete, similarity stored).
-
-        Disputed status is now computed *dynamically* at query time by comparing
-        ``similarity`` against the caller-supplied threshold, so only the
-        ``resolved`` status set explicitly by the user is preserved here.
-        """
+        """Save an automatically checked chunk that passed the current checker set."""
         raw_transcription = transcription if raw_transcription is None else raw_transcription
         self._upsert_chunk_cache(
             chapter_key=chapter_key,
@@ -348,7 +344,7 @@ class AudioChunkStore:
             reference_check_status=reference_check_status,
             reference_check_payload=reference_check_payload,
             status=STATUS_CHECKED,
-            keep_resolved=True,  # never overwrite a user-approved decision
+            keep_resolved=not force_status,  # force_status=True allows rewriting any prior verdict
         )
 
     def save_disputed_chunk(
@@ -363,11 +359,13 @@ class AudioChunkStore:
         reference_check_threshold: float | None = None,
         reference_check_status: str | None = None,
         reference_check_payload: str | None = None,
+        force_status: bool = False,
     ) -> None:
-        """Backwards-compatible wrapper — delegates to save_checked_chunk.
+        """Store a chunk that the checker pipeline has deemed disputed.
 
-        With dynamic disputed status the ``disputed`` label is no longer stored
-        in the DB; it is derived at query time from ``similarity < threshold``.
+        Marks ``status = 'disputed'`` so the Review UI can surface it without
+        re-running audio_check.  An existing ``resolved`` status (user-approved)
+        is never overwritten.
         """
         raw_transcription = transcription if raw_transcription is None else raw_transcription
         self._upsert_chunk_cache(
@@ -381,11 +379,11 @@ class AudioChunkStore:
             reference_check_threshold=reference_check_threshold,
             reference_check_status=reference_check_status,
             reference_check_payload=reference_check_payload,
-            status=STATUS_CHECKED,
-            keep_resolved=True,
+            status=STATUS_DISPUTED,
+            keep_resolved=not force_status,
         )
         logger.info(
-            "Recorded/updated chunk chapter=%s hash=%s similarity=%.2f",
+            "Marked disputed chunk chapter=%s hash=%s similarity=%.2f",
             chapter_key, sentence_hash[:8], similarity,
         )
 
@@ -449,28 +447,23 @@ class AudioChunkStore:
         )
 
     def get_disputed_chunks(self, chapter_key: str, threshold: float = 0.70) -> List[sqlite3.Row]:
-        """Return chunks whose similarity falls below *threshold* or reference check is suspicious.
+        """Return chunks that are disputed for this chapter.
 
-        The disputed/ok decision is dynamic: no static ``disputed`` status is
-        stored.  Pass ``threshold`` matching the current ``audio_check_threshold``
-        config value to get the expected results without re-running audio_check.
-        Rows with ``status = 'resolved'`` (user-approved) are always excluded.
-        Deleted-audio rows (similarity = 0.0, transcription starting with
-        '[manual]') are included for any threshold > 0.
+        Only rows whose main ``status`` is ``'disputed'`` are returned.
+        The *threshold* argument is kept for backward compatibility but is
+        intentionally ignored here: checker-specific fields such as
+        ``similarity`` and ``reference_check_status`` are diagnostic metadata,
+        not an alternate source of disputed state for the Review UI.
         """
         with closing(self._connect()) as conn:
             return conn.execute(
                 """
                 SELECT * FROM chunk_cache
                 WHERE chapter_key = ?
-                  AND (
-                    (similarity IS NOT NULL AND similarity < ?)
-                    OR reference_check_status = 'suspicious'
-                  )
-                  AND (status IS NULL OR status != ?)
+                  AND status = ?
                 ORDER BY similarity ASC
                 """,
-                (chapter_key, threshold, STATUS_RESOLVED),
+                (chapter_key, STATUS_DISPUTED),
             ).fetchall()
 
     def resolve_disputed_chunk(self, chapter_key: str, sentence_hash: str) -> None:
@@ -530,22 +523,19 @@ class AudioChunkStore:
         return int(row["cnt"]) if row else 0
 
     def get_all_failed_chunks(self, threshold: float) -> List[sqlite3.Row]:
-        """Return all chunk_cache rows with similarity < threshold that are not resolved.
+        """Return all disputed chunk_cache rows that are not resolved.
 
-        Used by audio_auto mode to find chunks that need re-synthesis.
+        Only the main ``status`` drives retry selection.
+        The *threshold* argument is kept for backward compatibility but is
+        intentionally ignored: per-checker metrics remain informative only.
         """
         with closing(self._connect()) as conn:
             return conn.execute(
                 """
                 SELECT chapter_key, sentence_hash, similarity, original_text
                 FROM chunk_cache
-                WHERE (
-                    (similarity IS NOT NULL AND similarity < ?)
-                    OR reference_check_status = 'suspicious'
-                  )
-                  AND (status IS NULL OR status != ?)
+                WHERE status = ?
                 ORDER BY chapter_key, similarity ASC
                 """,
-                (threshold, STATUS_RESOLVED),
+                (STATUS_DISPUTED,),
             ).fetchall()
-

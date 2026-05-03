@@ -103,6 +103,7 @@ def _build_argparse_namespace(**overrides):
         force_new_run=False,
         package_m4b=False,
         chunked_audio=True,
+        chunked_audio_no_db=False,
         audio_folder=None,
         m4b_filename=None,
         m4b_bitrate="64k",

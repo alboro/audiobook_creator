@@ -73,6 +73,15 @@ def handle_args():
         help="Inference device for Whisper: cpu or cuda (default: cpu).",
     )
     parser.add_argument(
+        "--audio_check_force",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Force audio_check to ignore stored chunk status and overwrite it in the DB. "
+            "Useful after changing the checker set or fixing checker logic."
+        ),
+    )
+    parser.add_argument(
         "--audio_reference_check_command",
         default=None,
         help=(

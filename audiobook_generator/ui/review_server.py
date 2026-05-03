@@ -216,8 +216,10 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
     voice2 = _config_voice_name2()
     pairs = split_sentences_with_voices(text, "ru", voice2=voice2)
 
-    # Load auto-retry counts from DB (if DB exists)
+    # Load audio-check data from DB (if DB exists)
     retry_counts: dict[str, int] = {}
+    check_statuses: dict[str, str | None] = {}
+    check_similarity: dict[str, float | None] = {}
     db_path = _audio_db_path(dir)
     if Path(db_path).exists():
         try:
@@ -227,6 +229,28 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
                 cnt = store.get_auto_deletion_count(h)
                 if cnt:
                     retry_counts[h] = cnt
+                row = store.get_cached_transcription_entry(chapter_key, h)
+                if row:
+                    check_statuses[h] = row["status"]
+                    # similarity is not in get_cached_transcription_entry; fetch via full row
+        except Exception:
+            pass
+
+    # Also fetch similarity for each chunk via a separate query if DB exists
+    if Path(db_path).exists():
+        try:
+            import sqlite3 as _sqlite3
+            from contextlib import closing as _closing
+            with _closing(_sqlite3.connect(str(db_path), timeout=10)) as _conn:
+                _conn.row_factory = _sqlite3.Row
+                for _chunk, _ in pairs:
+                    h = _sentence_hash(_chunk)
+                    r = _conn.execute(
+                        "SELECT similarity FROM chunk_cache WHERE chapter_key=? AND sentence_hash=?",
+                        (chapter_key, h),
+                    ).fetchone()
+                    if r:
+                        check_similarity[h] = r["similarity"]
         except Exception:
             pass
 
@@ -238,7 +262,11 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
         created_at: float | None = None
         if audio_path:
             try:
-                created_at = Path(audio_path).stat().st_mtime
+                st = Path(audio_path).stat()
+                # Prefer birth time (creation time) when available (macOS/APFS).
+                # st_mtime changes when post-processing modifies the file in place;
+                # st_birthtime stays fixed at the moment TTS first created the file.
+                created_at = getattr(st, "st_birthtime", None) or st.st_mtime
             except OSError:
                 pass
         result.append({
@@ -254,6 +282,10 @@ async def get_chunks(dir: str, chapter_key: str, text_path: str):
             "duration_s": round(dur, 3) if dur is not None else None,
             # Unix timestamp (seconds) when the audio file was last modified
             "created_at": round(created_at) if created_at is not None else None,
+            # audio-check status from DB: 'checked' | 'disputed' | 'resolved' | null
+            "check_status": check_statuses.get(h),
+            # whisper similarity score from last audio_check run (null if never checked)
+            "check_similarity": check_similarity.get(h),
         })
     return result
 
@@ -567,10 +599,9 @@ async def get_settings():
 
 @app.get("/api/disputed")
 async def get_disputed(dir: str, chapter_key: str, threshold: float = 0.70):
-    """Return chunks whose similarity falls below threshold (dynamic, no re-run needed).
+    """Return chunks whose main status is ``disputed``.
 
-    *threshold* defaults to 0.70 but the Review UI passes the value the user
-    configured so results update instantly on threshold changes.
+    *threshold* is accepted for backward compatibility but intentionally ignored.
     """
     db_path = _audio_db_path(dir)
     if not Path(db_path).exists():
@@ -669,4 +700,3 @@ def host_review_ui_fastapi(config):
     port = getattr(config, "port", None) or 7861
     print(f"Review UI → http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")
-

@@ -212,6 +212,11 @@ class GeneralConfig:
         self.audio_check_model = getattr(args, 'audio_check_model', None)
         self.audio_check_threshold = getattr(args, 'audio_check_threshold', None)
         self.audio_check_device = getattr(args, 'audio_check_device', None)
+        self.audio_check_force = getattr(args, 'audio_check_force', None)
+        # Comma-separated list of checker names to run (see AUDIO_CHECKER_REGISTRY).
+        # Default: whisper_similarity,first_word,last_word
+        # Full set:  whisper_similarity,first_word,last_word,reference
+        self.audio_check_checkers = getattr(args, 'audio_check_checkers', None)
         self.audio_reference_check_command = getattr(args, 'audio_reference_check_command', None)
         self.audio_reference_check_threshold = getattr(args, 'audio_reference_check_threshold', None)
         self.audio_reference_check_timeout = getattr(args, 'audio_reference_check_timeout', None)

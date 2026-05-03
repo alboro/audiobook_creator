@@ -103,6 +103,10 @@ PARTIAL_DATE_PATTERN = re.compile(
 )
 
 # Year + "год" form: "1917 год", "в 1917 году" — before ORDINAL_NOUN_PATTERN
+YEAR_RANGE_PATTERN = re.compile(
+    r"(?<!\w)([12]\d{3})\s*([–—-])\s*([12]\d{3})\s+(годы|год(?:а|у|ом|е)?)\b",
+    re.IGNORECASE,
+)
 YEAR_PATTERN = re.compile(
     r"(?<!\w)([12]\d{3})\s+(год[аеу]?|годом)\b",
     re.IGNORECASE,
@@ -321,6 +325,8 @@ class NumbersRuNormalizer(BaseNormalizer):
         replacements += count
 
         # Years with "год" form
+        normalized, count = YEAR_RANGE_PATTERN.subn(self._replace_year_range, normalized)
+        replacements += count
         normalized, count = YEAR_PATTERN.subn(self._replace_year, normalized)
         replacements += count
 
@@ -424,6 +430,32 @@ class NumbersRuNormalizer(BaseNormalizer):
     # ------------------------------------------------------------------
     # Handlers — years
     # ------------------------------------------------------------------
+
+    def _replace_year_range(self, match: re.Match[str]) -> str:
+        left_year = int(match.group(1))
+        dash = match.group(2)
+        right_year = int(match.group(3))
+        year_noun = match.group(4)
+        noun_lower = year_noun.lower()
+
+        # Whisper often collapses "1794-1796 годы" to "... год". For compare/TTS
+        # we normalize year ranges to the natural plural surface.
+        output_noun = "годы" if noun_lower == "год" else year_noun
+        if output_noun.lower() == "годы":
+            gender, case = ("m", "n")
+        else:
+            noun_config = YEAR_NOUN_FORMS.get(noun_lower)
+            if noun_config is None:
+                return match.group(0)
+            gender, case = noun_config
+
+        try:
+            left_spoken = self._to_words(left_year, to="ordinal", gender=gender, case=case)
+            right_spoken = self._to_words(right_year, to="ordinal", gender=gender, case=case)
+        except Exception:
+            left_spoken = self._to_words(left_year)
+            right_spoken = self._to_words(right_year)
+        return f"{left_spoken} {dash} {right_spoken} {output_noun}"
 
     def _replace_year(self, match: re.Match[str]) -> str:
         year = int(match.group(1))
@@ -635,4 +667,7 @@ class NumbersRuNormalizer(BaseNormalizer):
 
     def _to_words(self, value, **kwargs) -> str:
         spoken = num2words(value, lang="ru", **kwargs)
-        return re.sub(r"\s+", " ", str(spoken)).strip()
+        spoken = re.sub(r"\s+", " ", str(spoken)).strip()
+        if kwargs.get("to") != "ordinal":
+            spoken = re.sub(r"^одна\s+тысяча\b", "тысяча", spoken, flags=re.IGNORECASE)
+        return spoken

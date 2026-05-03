@@ -35,7 +35,6 @@ import argparse
 import logging
 import sqlite3
 from contextlib import closing
-from difflib import SequenceMatcher
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -44,22 +43,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Normalisation helpers (mirrors audio_checker logic exactly)
 # ---------------------------------------------------------------------------
-
-def _normalize_for_compare(text: str) -> str:
-    """Keep only Cyrillic/Latin letters and spaces, lowercase, strip diacritics."""
-    import re
-    import unicodedata
-    nfd = unicodedata.normalize("NFD", text.replace("+", ""))
-    stripped = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
-    only_letters = re.sub(r"[^\w ]", " ", stripped.lower())
-    only_letters = re.sub(r"[0-9_]", " ", only_letters)
-    return re.sub(r"\s+", " ", only_letters).strip()
-
-
-def _similarity(a: str, b: str) -> float:
-    if not a and not b:
-        return 1.0
-    return SequenceMatcher(None, a, b).ratio()
+from audiobook_generator.core.audio_checkers.base_audio_chunk_checker import (
+    normalize_for_compare as _normalize_for_compare,
+    normalize_for_phonetic_compare as _normalize_for_phonetic_compare,
+    similarity as _similarity,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -213,10 +201,17 @@ def recalculate(
             continue
 
         # Recompute similarity with pre_compare applied to both sides
-        norm_orig  = _normalize_for_compare(normalize(original_text))
-        norm_trans = _normalize_for_compare(normalize(raw_trans))
-        new_sim    = _similarity(norm_orig, norm_trans)
-        new_trans  = normalize(raw_trans)  # store expanded form as transcription
+        prepared_orig = normalize(original_text)
+        prepared_trans = normalize(raw_trans)
+        norm_orig  = _normalize_for_compare(prepared_orig)
+        norm_trans = _normalize_for_compare(prepared_trans)
+        phon_orig  = _normalize_for_phonetic_compare(prepared_orig)
+        phon_trans = _normalize_for_phonetic_compare(prepared_trans)
+        new_sim    = max(
+            _similarity(norm_orig, norm_trans),
+            _similarity(phon_orig, phon_trans),
+        )
+        new_trans  = prepared_trans  # store expanded form as transcription
 
         delta = new_sim - (old_sim or 0.0)
 
@@ -295,4 +290,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

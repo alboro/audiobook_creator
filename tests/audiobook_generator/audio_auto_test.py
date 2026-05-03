@@ -73,23 +73,23 @@ class TestAutoDeleteTracking:
         store.record_auto_deletion("0002_Ch", "shared_hash", 0.65, 0.78)
         assert store.get_auto_deletion_count("shared_hash") == 2
 
-    def test_get_all_failed_chunks_respects_threshold(self, tmp_path):
-        """get_all_failed_chunks returns only rows below the given threshold."""
+    def test_get_all_failed_chunks_returns_only_disputed_rows(self, tmp_path):
+        """get_all_failed_chunks must use only the main disputed status."""
         store = _make_store(tmp_path)
-        store.save_checked_chunk("0001_Ch", "low_h", "text", "transc", 0.50)
+        store.save_disputed_chunk("0001_Ch", "low_h", "text", "transc", 0.50)
         store.save_checked_chunk("0001_Ch", "high_h", "text2", "transc2", 0.90)
-        store.save_checked_chunk("0001_Ch", "border_h", "textb", "transcb", 0.78)
+        store.save_checked_chunk("0001_Ch", "checked_low_sim", "textb", "transcb", 0.10)
 
         failed = store.get_all_failed_chunks(0.78)
         hashes = {r["sentence_hash"] for r in failed}
         assert "low_h" in hashes
         assert "high_h" not in hashes
-        assert "border_h" not in hashes  # 0.78 is not < 0.78
+        assert "checked_low_sim" not in hashes
 
     def test_get_all_failed_chunks_excludes_resolved(self, tmp_path):
         """get_all_failed_chunks never returns resolved chunks."""
         store = _make_store(tmp_path)
-        store.save_checked_chunk("0001_Ch", "h1", "text", "transc", 0.40)
+        store.save_disputed_chunk("0001_Ch", "h1", "text", "transc", 0.40)
         store.resolve_disputed_chunk("0001_Ch", "h1")
 
         failed = store.get_all_failed_chunks(0.78)
@@ -293,4 +293,3 @@ class TestRunAudioAuto:
             f"Expected 3 deletions (= max_retry), got {count}. "
             "Each failed attempt should be recorded."
         )
-

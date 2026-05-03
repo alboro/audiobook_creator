@@ -103,34 +103,27 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
           title="Disputed threshold from config (audio_check_threshold)">
       ⚠ <span style="color:#f38ba8" x-text="disputeThreshold"></span>
     </span>
+    <!-- Sort order selector -->
     <template x-if="currentChapter">
-      <button class="btn btn-green" @click="togglePlayAll()"
-              x-text="playlist.mode === 'all' ? 'Stop' : 'Play All'"></button>
+      <select x-model="chunkSortOrder"
+              style="background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:4px 8px;font-size:12px;cursor:pointer">
+        <option value="natural">По порядку</option>
+        <option value="newest_first">Сначала новые</option>
+      </select>
     </template>
-    <!-- "Play Disputed" + "Filter" tab — shown when NOT already in disputed view -->
-    <template x-if="currentChapter && Object.keys(disputedMap).length > 0 && !showOnlyDisputed">
-      <button class="btn" style="background:#4a2535;color:#f38ba8;border:1px solid #6a3545"
-              @click="togglePlayDisputed()"
-              x-text="'🔴 Play Disputed (' + Object.keys(disputedMap).length + ')'"></button>
+    <!-- Disputed filter toggle -->
+    <template x-if="currentChapter && Object.keys(disputedMap).length > 0">
+      <button class="btn"
+              :style="showOnlyDisputed ? 'background:#313244;color:#cdd6f4' : 'background:#4a2535;color:#f38ba8;border:1px solid #6a3545'"
+              @click="toggleDisputedFilter()"
+              x-text="showOnlyDisputed ? '← Все' : '⚠ Disputed (' + Object.keys(disputedMap).length + ')'"></button>
     </template>
-    <template x-if="currentChapter && Object.keys(disputedMap).length > 0 && !showOnlyDisputed">
-      <button class="btn btn-secondary" title="Show disputed only without autoplay"
-              @click="showDisputedFilter()">⚠ Filter</button>
-    </template>
-    <!-- Controls inside disputed filter view -->
-    <!-- ⏹ Stop auto-advance (stay in filter) -->
-    <template x-if="showOnlyDisputed && playlist.mode === 'disputed'">
-      <button class="btn btn-secondary" title="Stop auto-play, stay in disputed view"
-              @click="stopAutoPlay()">⏹ Stop</button>
-    </template>
-    <!-- ▶ Play — start auto-playing while already in disputed filter -->
-    <template x-if="showOnlyDisputed && playlist.mode !== 'disputed'">
-      <button class="btn" style="background:#4a2535;color:#f38ba8;border:1px solid #6a3545"
-              @click="startDisputedPlayback()">&#9654; Play</button>
-    </template>
-    <!-- ← Show All — exits disputed filter entirely -->
-    <template x-if="showOnlyDisputed">
-      <button class="btn btn-secondary" @click="exitDisputedFilter()">&#8592; Show All</button>
+    <!-- Single Autoplay button -->
+    <template x-if="currentChapter">
+      <button class="btn"
+              :class="playlist.mode ? 'btn-secondary' : 'btn-green'"
+              @click="toggleAutoplay()"
+              x-text="playlist.mode ? '⏹ Stop' : '▶ Autoplay'"></button>
     </template>
     <template x-if="currentChapter">
       <button class="btn btn-primary" @click="synthesize()" :disabled="synthesizing"
@@ -176,67 +169,66 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
       <template x-if="!currentChapter"><div class="empty">&larr; Select a chapter</div></template>
       <template x-if="chunksLoading"><div class="empty"><span class="spin"></span> Loading&hellip;</div></template>
 
-      <template x-for="(chunk, i) in chunks" :key="chunk.hash + '_' + i">
+      <template x-for="item in sortedChunkItems()" :key="item.chunk.hash + '_' + item.origIdx">
         <div class="chunk-row"
-             x-show="!showOnlyDisputed || isDisputed(chunk.hash)"
-             :data-ci="i"
-             :class="{playing: playingIdx===i && !histPlaying, editing: editingIdx===i, 'hist-open': histChunk===i, disputed: isDisputed(chunk.hash) && disputeChunk!==i}">
+             x-show="!showOnlyDisputed || isDisputed(item.chunk.hash)"
+             :data-ci="item.origIdx"
+             :class="{playing: playingIdx===item.origIdx && !histPlaying, editing: editingIdx===item.origIdx, 'hist-open': histChunk===item.origIdx, disputed: isDisputed(item.chunk.hash) && disputeChunk!==item.origIdx}">
 
-          <span class="cnum" x-text="i+1"></span>
+          <span class="cnum" x-text="item.origIdx+1"></span>
 
           <div class="cbody">
-            <template x-if="editingIdx !== i">
+            <template x-if="editingIdx !== item.origIdx">
               <div>
-                <div class="ctext" :class="{noaudio: !chunk.has_audio}" x-text="chunk.text"></div>
-                <template x-if="isDisputed(chunk.hash)"><span class="disputed-badge">⚠ disputed</span></template>
-                <template x-if="chunk.voice"><span class="voice-badge" x-text="'🎙 ' + chunk.voice"></span></template>
-                <template x-if="chunk.has_audio">
-                  <a class="chash" :href="_url(chunk.hash)" download x-text="chunk.hash.slice(0,8)"></a>
+                <div class="ctext" :class="{noaudio: !item.chunk.has_audio}" x-text="item.chunk.text"></div>
+                <template x-if="isDisputed(item.chunk.hash)"><span class="disputed-badge">⚠ disputed</span></template>
+                <template x-if="item.chunk.voice"><span class="voice-badge" x-text="'🎙 ' + item.chunk.voice"></span></template>
+                <template x-if="item.chunk.has_audio">
+                  <a class="chash" :href="_url(item.chunk.hash)" download x-text="item.chunk.hash.slice(0,8)"></a>
                 </template>
-                <template x-if="chunk.has_audio && chunkTimingStr(chunk, i)">
-                  <span class="ctiming" x-text="chunkTimingStr(chunk, i)"></span>
+                <template x-if="item.chunk.has_audio && chunkTimingStr(item.chunk, item.origIdx)">
+                  <span class="ctiming" x-text="chunkTimingStr(item.chunk, item.origIdx)"></span>
                 </template>
-                <template x-if="chunk.has_audio && chunk.created_at">
-                  <span class="ctiming ctiming-pos" x-text="_fmtCreatedAt(chunk.created_at)"></span>
+                <template x-if="item.chunk.has_audio && item.chunk.created_at">
+                  <span class="ctiming ctiming-pos" x-text="_fmtCreatedAt(item.chunk.created_at)"></span>
                 </template>
-                <template x-if="chunk.has_audio && chunk.auto_retry_count > 0">
-                  <span class="retry-badge" :title="'re-synthesised ' + chunk.auto_retry_count + ' time(s)'" x-text="'↻' + chunk.auto_retry_count"></span>
+                <template x-if="item.chunk.has_audio && item.chunk.auto_retry_count > 0">
+                  <span class="retry-badge" :title="'re-synthesised ' + item.chunk.auto_retry_count + ' time(s)'" x-text="'↻' + item.chunk.auto_retry_count"></span>
                 </template>
-                <template x-if="!chunk.has_audio">
+                <template x-if="!item.chunk.has_audio">
                   <div class="chash" style="display:inline">
-                    <span x-text="chunk.hash.slice(0,8) + ' · no audio'"></span>
-                    <template x-if="chunk.auto_retry_count > 0">
-                      <span class="retry-badge" :title="'auto-deleted ' + chunk.auto_retry_count + ' time(s) for re-synthesis'" x-text="'↻' + chunk.auto_retry_count"></span>
+                    <span x-text="item.chunk.hash.slice(0,8) + ' · no audio'"></span>
+                    <template x-if="item.chunk.auto_retry_count > 0">
+                      <span class="retry-badge" :title="'auto-deleted ' + item.chunk.auto_retry_count + ' time(s) for re-synthesis'" x-text="'↻' + item.chunk.auto_retry_count"></span>
                     </template>
                   </div>
                 </template>
               </div>
             </template>
-            <template x-if="editingIdx === i">
+            <template x-if="editingIdx === item.origIdx">
               <div>
                 <div style="font-size:11px;color:#6c7086;margin-bottom:2px">Editing:</div>
                 <textarea class="edit-area" x-model="editText" @keydown.escape="cancelEdit()" rows="3"></textarea>
                 <div class="edit-row">
-                  <button class="btn btn-primary btn-sm" @click="saveEdit(i)">Save</button>
+                  <button class="btn btn-primary btn-sm" @click="saveEdit(item.origIdx)">Save</button>
                   <button class="btn btn-secondary btn-sm" @click="cancelEdit()">Cancel</button>
                 </div>
               </div>
             </template>
 
-            <template x-if="histChunk === i">
+            <template x-if="histChunk === item.origIdx">
               <div class="hist-block">
-                <!-- ...existing history block... -->
                 <template x-if="histEntries.length === 0">
                   <div style="font-size:11px;color:#6c7086">No previous versions</div>
                 </template>
                 <template x-for="(hv, hi) in histEntries" :key="hv.hash">
-                  <div class="hv-item" :class="{sel: histSel===hi}" @click="selectHistEntry(i, hi)">
+                  <div class="hv-item" :class="{sel: histSel===hi}" @click="selectHistEntry(item.origIdx, hi)">
                     <div class="hv-hash" x-text="hv.hash.slice(0,8) + ' to ' + (hv.replaced_by ? hv.replaced_by.slice(0,8) : 'deleted')"></div>
                     <div class="hv-text" x-text="hv.text"></div>
                     <div class="hv-date" x-text="hv.created_at"></div>
                     <template x-if="histSel === hi">
                       <div class="hv-actions">
-                        <button class="btn btn-green btn-sm" @click.stop="restoreHist(i, hi)">Restore</button>
+                        <button class="btn btn-green btn-sm" @click.stop="restoreHist(item.origIdx, hi)">Restore</button>
                       </div>
                     </template>
                   </div>
@@ -250,14 +242,14 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
               </div>
             </template>
 
-            <template x-if="disputeChunk === i">
+            <template x-if="disputeChunk === item.origIdx">
               <div class="disputed-panel">
-                <div class="disp-sim" x-text="'similarity: ' + (disputedMap[chunk.hash]?.similarity?.toFixed(2) ?? '?')"></div>
-                <div style="font-size:10px;color:#6c7086;margin-bottom:2px">Whisper transcription:</div>
-                <div class="disp-transcription" x-text="disputedMap[chunk.hash]?.transcription ?? ''"></div>
+                <div class="disp-sim" x-text="'similarity: ' + (disputedMap[item.chunk.hash]?.similarity?.toFixed(2) ?? '?')"></div>
+                <div style="font-size:10px;color:#6c7086;margin-bottom:2px">Normalized transcription:</div>
+                <div class="disp-transcription" x-text="disputedMap[item.chunk.hash]?.transcription ?? ''"></div>
                 <div style="margin-top:6px;display:flex;gap:5px">
                   <button class="btn btn-sm" style="background:#3a2020;color:#f38ba8;border:1px solid #5a3030"
-                          @click="resolveDisputed(i)">Mark resolved</button>
+                          @click="resolveDisputed(item.origIdx)">Mark resolved</button>
                   <button class="btn btn-secondary btn-sm" @click="disputeChunk=-1">Close</button>
                 </div>
               </div>
@@ -265,24 +257,24 @@ a.chash:hover{color:#89b4fa;text-decoration:underline}
           </div>
 
           <div class="cbtns">
-            <button class="ib" :class="{on: playingIdx===i && !histPlaying && !audioPaused}"
-                    :data-tip="(playingIdx===i && !histPlaying && !audioPaused) ? 'Pause' : 'Play'"
-                    @click="playBtn(i)"
-                    x-text="(playingIdx===i && !histPlaying && !audioPaused) ? '⏸' : '▶'"></button>
-            <button class="ib" :class="{on: histChunk===i}"
-                    data-tip="History" @click="toggleHist(i)">&#128220;</button>
-            <button class="ib" :class="{on: editingIdx===i}"
-                    data-tip="Edit" @click="startEdit(i)">&#9999;</button>
-            <template x-if="chunk.has_audio">
+            <button class="ib" :class="{on: playingIdx===item.origIdx && !histPlaying && !audioPaused}"
+                    :data-tip="(playingIdx===item.origIdx && !histPlaying && !audioPaused) ? 'Pause' : 'Play'"
+                    @click="playBtn(item.origIdx)"
+                    x-text="(playingIdx===item.origIdx && !histPlaying && !audioPaused) ? '⏸' : '▶'"></button>
+            <button class="ib" :class="{on: histChunk===item.origIdx}"
+                    data-tip="History" @click="toggleHist(item.origIdx)">&#128220;</button>
+            <button class="ib" :class="{on: editingIdx===item.origIdx}"
+                    data-tip="Edit" @click="startEdit(item.origIdx)">&#9999;</button>
+            <template x-if="item.chunk.has_audio">
               <button class="ib red"
-                      data-tip="Delete audio" @click="delAudio(i)">&#128263;</button>
+                      data-tip="Delete audio" @click="delAudio(item.origIdx)">&#128263;</button>
             </template>
-            <template x-if="isDisputed(chunk.hash)">
-              <button class="ib" :class="{on: disputeChunk===i}"
-                      data-tip="Disputed" @click="toggleDisputed(i)" style="color:#f38ba8">&#9888;</button>
+            <template x-if="isDisputed(item.chunk.hash)">
+              <button class="ib" :class="{on: disputeChunk===item.origIdx}"
+                      data-tip="Disputed" @click="toggleDisputed(item.origIdx)" style="color:#f38ba8">&#9888;</button>
             </template>
             <button class="ib red"
-                    data-tip="Delete" @click="delChunk(i)">&#128465;</button>
+                    data-tip="Delete" @click="delChunk(item.origIdx)">&#128465;</button>
           </div>
         </div>
       </template>
@@ -353,6 +345,8 @@ function reviewApp() {
     chapterTitleText: '',
     chapterTitleOverrides: [],   // 0-based array: overrides[chapter_idx - 1]
     chapterTitlesPath: null,
+    // sort order for chunk list and autoplay
+    chunkSortOrder: 'natural',   // 'natural' | 'newest_first'
     // timing
     chapterOffsets: {},      // chapter_key → book-global start offset (s)
     chunkChapOffsets: [],    // per-chunk cumulative chapter offset (s), indexed by chunk position
@@ -497,10 +491,27 @@ function reviewApp() {
         this.chunks = await r.json();
         this.st(this.chunks.length + ' chunks');
 
+        // Pre-populate disputedMap from check_status field (immediate, no extra request).
+        // This ensures disputed badges appear right away without waiting for /api/disputed.
+        const preliminary = {};
+        for (const chunk of this.chunks) {
+          if (chunk.check_status === 'disputed') {
+            preliminary[chunk.hash] = {
+              hash: chunk.hash,
+              similarity: chunk.check_similarity,
+              transcription: '',
+              status: 'disputed',
+            };
+          }
+        }
+        if (Object.keys(preliminary).length > 0) {
+          this.disputedMap = preliminary;
+        }
+
         // Pre-compute cumulative chapter offsets for timing badges (O(n), done once).
         this._computeChunkOffsets();
 
-        // Load disputed chunks in the background
+        // Load disputed chunks in the background (fills in transcription etc.)
         this._loadDisputed(ch.key).catch(() => {});
 
         // Restore saved chunk position for this chapter
@@ -568,21 +579,31 @@ function reviewApp() {
       }
     },
 
+    /* ── Sorted chunk view ── */
+    sortedChunkItems() {
+      const items = this.chunks.map((chunk, i) => ({ chunk, origIdx: i }));
+      if (this.chunkSortOrder === 'newest_first') {
+        items.sort((a, b) => (b.chunk.created_at || 0) - (a.chunk.created_at || 0));
+      }
+      return items;
+    },
+
     /* ── Playlist core ── */
 
     // Returns true when any auto-advance mode is active.
     _isPlaylistActive() { return this.playlist.mode !== null; },
 
     // Single point of truth for "what chunks belong to a mode".
-    // To add a new mode, add ONE branch here — nothing else needs to change.
+    // Respects the current chunkSortOrder.
     _buildPlaylistIndices(mode) {
+      const sorted = this.sortedChunkItems();
       if (mode === 'all') {
-        return this.chunks.map((_, i) => i);
+        return sorted.map(item => item.origIdx);
       }
       if (mode === 'disputed') {
-        return this.chunks
-          .map((c, i) => this.isDisputed(c.hash) ? i : -1)
-          .filter(i => i >= 0);
+        return sorted
+          .filter(item => this.isDisputed(item.chunk.hash))
+          .map(item => item.origIdx);
       }
       return [];
     },
@@ -746,7 +767,25 @@ function reviewApp() {
       }
     },
 
-    /* ── Play All / Play Disputed buttons ── */
+    /* ── Autoplay / Disputed filter buttons ── */
+
+    // Single Autoplay button: uses current filter state to pick mode.
+    toggleAutoplay() {
+      if (this._isPlaylistActive()) { this._stopPlaylist(); return; }
+      const mode = this.showOnlyDisputed ? 'disputed' : 'all';
+      this._startPlaylist(mode);
+    },
+
+    // Toggle disputed filter (without starting playback).
+    toggleDisputedFilter() {
+      if (this.showOnlyDisputed) {
+        this.exitDisputedFilter();
+      } else {
+        this.showDisputedFilter();
+      }
+    },
+
+    /* ── Legacy Play All / Play Disputed (kept for internal call sites) ── */
     togglePlayAll() {
       if (this.playlist.mode === 'all') { this._stopPlaylist(); return; }
       this._startPlaylist('all');

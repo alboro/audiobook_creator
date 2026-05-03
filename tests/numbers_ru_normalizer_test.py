@@ -257,6 +257,12 @@ class TestNumbersRuNormalizerYears(unittest.TestCase):
         self.assertIn("тысяча девятьсот семнадцать", result)
         self.assertIn("тысяча девятьсот двадцать", result)
 
+    def test_year_range_with_year_noun_uses_ordinals_without_redundant_one(self):
+        self.assertEqual(
+            self.n.normalize("1794-1796 год"),
+            "тысяча семьсот девяносто четвёртый - тысяча семьсот девяносто шестой годы",
+        )
+
     def test_year_with_ordinal_suffix_m(self):
         # "в 2017-м году" — ORDINAL_PATTERN handles "-м", "году" stays
         result = self.n.normalize("в 2017-м году")
@@ -411,8 +417,7 @@ class TestNumbersRuNormalizerCurrency(unittest.TestCase):
         self.assertEqual(self.n.normalize("€50"), "пятьдесят евро")
 
     def test_rubles(self):
-        # num2words(1000, lang='ru') returns "одна тысяча"
-        self.assertEqual(self.n.normalize("₽1000"), "одна тысяча рублей")
+        self.assertEqual(self.n.normalize("₽1000"), "тысяча рублей")
 
     def test_rubles_2(self):
         self.assertEqual(self.n.normalize("₽2"), "два рубля")

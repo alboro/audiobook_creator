@@ -4,76 +4,52 @@
 
 """Audio quality checker.
 
-Transcribes every synthesised audio chunk with Whisper, normalises both
-the original text and the transcription to "letters + spaces only", then
-compares them.  Chunks whose similarity falls below *threshold* are marked
-as disputed in the AudioChunkStore so they can be reviewed in the Review UI.
+Transcribes every synthesised audio chunk with Whisper, then runs the
+configured checker pipeline to decide whether the chunk is *disputed*.
+
+Checker pipeline is controlled by ``audio_check_checkers`` in the INI file
+(comma-separated names from AUDIO_CHECKER_REGISTRY).  Default:
+``whisper_similarity,first_word,last_word``.
 
 Approach: text-first.
   1. Scan ``text/<latest_run>/`` for chapter .txt files.
   2. Split each chapter text into sentences (same logic as ChunkedAudioGenerator).
   3. Compute sentence hash; check if ``wav/chunks/<chapter_key>/<hash>.*`` exists.
-  4. Transcribe existing audio and compare with original sentence text.
-
-NOTE: Standard Whisper (faster-whisper) does NOT output Russian stress marks
-(ударения / combining acute accents).  Stress marks are therefore stripped from
-the original text before comparison so that annotated TTS source text can match
-plain Whisper output.  If per-word stress quality matters, review disputed chunks
-manually in the Review UI and re-synthesise as needed.
+  4. Transcribe existing audio and run checker pipeline.
 
 Usage (CLI):
-    .venv/bin/python -m audiobook_generator.core.audio_checker \
-        --output_folder /path/to/book_output \
+    .venv/bin/python -m audiobook_generator.core.audio_checker \\
+        --output_folder /path/to/book_output \\
         [--model small] [--language ru] [--threshold 0.70]
+        [--checkers whisper_similarity,first_word,last_word,reference]
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
-import re
-import json
-import shlex
-import subprocess
 import sys
-import tempfile
-import unicodedata
 from datetime import UTC, datetime
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Text normalisation for comparison
+# Backward-compatible re-exports (imported by existing test code)
 # ---------------------------------------------------------------------------
-
-def _normalize_for_compare(text: str) -> str:
-    """Keep only Cyrillic / Latin letters and spaces, lowercase.
-
-    Stress marks (combining acute accents U+0301) and all other diacritics
-    are stripped before comparison so Whisper's plain output can match the
-    stress-annotated TTS source text.
-    """
-    # Strip Silero-style plus and combining diacritical marks
-    nfd = unicodedata.normalize("NFD", text.replace("+", ""))
-    stripped = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
-    # Keep only letters (any script) and spaces, lowercase
-    only_letters = re.sub(r"[^\w ]", " ", stripped.lower())
-    # Remove digits and underscores that \w matched
-    only_letters = re.sub(r"[0-9_]", " ", only_letters)
-    return re.sub(r"\s+", " ", only_letters).strip()
-
-
-def _similarity(a: str, b: str) -> float:
-    """Character-level similarity ratio in [0, 1]."""
-    if not a and not b:
-        return 1.0
-    return SequenceMatcher(None, a, b).ratio()
-
+from audiobook_generator.core.audio_checkers.base_audio_chunk_checker import (  # noqa: E402
+    normalize_for_compare as _normalize_for_compare,
+)
+from audiobook_generator.core.audio_checkers.whisper_similarity_checker import (  # noqa: E402
+    _build_pre_compare_normalizer,
+)
+from audiobook_generator.core.audio_chunk_store import (  # noqa: E402
+    STATUS_CHECKED, STATUS_DISPUTED, STATUS_RESOLVED,
+)
 
 # ---------------------------------------------------------------------------
-# AudioChecker
+# Constants
 # ---------------------------------------------------------------------------
 
 DEFAULT_THRESHOLD = 0.70
@@ -82,78 +58,10 @@ DEFAULT_LANGUAGE = "ru"
 
 _AUDIO_EXTENSIONS = ["wav", "mp3", "ogg", "m4a"]
 
-# Deterministic normalizer steps applied to the original sentence text before
-# similarity comparison.  These expand abbreviations / numbers / symbols to
-# their spoken forms so Whisper's plain output can match the TTS source.
-_PRE_COMPARE_STEPS = "simple_symbols,ru_initials,ru_abbreviations,ru_numbers,ru_proper_names"
 
-
-def _build_pre_compare_normalizer(language: str = "ru"):
-    """Build a lightweight normalizer chain used only for pre-compare expansion.
-
-    Returns a callable ``normalize(text) -> str`` or None if construction fails.
-    """
-    try:
-        import types
-        from audiobook_generator.normalizers.base_normalizer import (
-            NORMALIZER_REGISTRY, ChainNormalizer,
-        )
-
-        # Minimal config stub — only fields required by the deterministic normalizers.
-        cfg = types.SimpleNamespace(
-            language=language,
-            normalize=True,
-            normalize_steps=_PRE_COMPARE_STEPS,
-            normalize_log_changes=False,
-            normalize_tts_safe_max_chars=180,
-            normalize_tts_safe_comma_as_period=False,
-            normalize_tts_pronunciation_overrides_words=None,
-            normalize_stress_paradox_words=None,
-            normalize_tsnorm_min_word_length=2,
-            normalize_tsnorm_stress_yo=False,
-            normalize_tsnorm_stress_monosyllabic=False,
-            normalize_model=None,
-            normalize_provider=None,
-            normalize_api_key=None,
-            normalize_base_url=None,
-            normalize_max_chars=4000,
-            normalize_system_prompt=None,
-            normalize_system_prompt_file=None,
-            normalize_prompt_file=None,
-            normalize_user_prompt_file=None,
-            output_folder=None,
-            prepared_text_folder=None,
-            _normalizer_llm_runtime=None,
-        )
-
-        steps = [s.strip() for s in _PRE_COMPARE_STEPS.split(",") if s.strip()]
-        normalizers = []
-        for step in steps:
-            entry = NORMALIZER_REGISTRY.get(step)
-            if not entry:
-                continue
-            mod_path, cls_name = entry
-            import importlib
-            mod = importlib.import_module(mod_path)
-            cls = getattr(mod, cls_name)
-            normalizers.append(cls(cfg))
-
-        if not normalizers:
-            return None
-
-        chain = ChainNormalizer(config=cfg, normalizers=normalizers, steps=steps)
-
-        def _normalize(text: str) -> str:
-            try:
-                return chain.normalize(text)
-            except Exception:
-                return text
-
-        return _normalize
-    except Exception as exc:
-        logger.warning("Could not build pre-compare normalizer: %s", exc)
-        return None
-
+# ---------------------------------------------------------------------------
+# Windows CUDA helper (unchanged)
+# ---------------------------------------------------------------------------
 
 def _iter_windows_cuda_dll_dirs() -> list[Path]:
     """Return candidate DLL directories that may satisfy faster-whisper on Windows."""
@@ -196,8 +104,17 @@ def _iter_windows_cuda_dll_dirs() -> list[Path]:
     return candidates
 
 
+# ---------------------------------------------------------------------------
+# AudioChecker
+# ---------------------------------------------------------------------------
+
 class AudioChecker:
-    """Walk text files to find synthesised chunks and quality-check them."""
+    """Walk text files to find synthesised chunks and quality-check them.
+
+    Transcription is always performed centrally (with caching) and passed to
+    every checker in the pipeline.  The pipeline is configured via
+    ``audio_check_checkers`` in the INI file.
+    """
 
     def __init__(
         self,
@@ -211,60 +128,73 @@ class AudioChecker:
     ):
         self.output_folder = Path(output_folder)
         self.language = language
-        self.threshold = threshold
+        self.threshold = threshold   # kept for logging / boundary-mismatch override
         self._model_size = model_size
         self._device = device
         self._compute_type = compute_type
-        self._model = None  # lazy-loaded
+        self._model = None           # lazy-loaded
         self._dll_dir_handles = []
         self._cuda_runtime_prepared = False
-        self._reference_check_command = getattr(config, "audio_reference_check_command", None) if config else None
-        self._reference_check_threshold = self._coerce_optional_float(
-            getattr(config, "audio_reference_check_threshold", None) if config else None
-        )
-        self._reference_check_timeout = self._coerce_timeout(
-            getattr(config, "audio_reference_check_timeout", None) if config else None
-        )
-        self._reference_check_cache_dir = (
-            getattr(config, "audio_reference_check_cache_dir", None) if config else None
-        )
-        self._reference_check_stress = (
-            getattr(config, "audio_reference_check_stress", None) if config else None
-        ) or "preserve"
+        self.force = bool(getattr(config, "audio_check_force", False)) if config else False
+
         self._prepared_text_folder = (
             getattr(config, "prepared_text_folder", None) if config else None
         )
-        self._ffmpeg_path = getattr(config, "ffmpeg_path", None) if config else None
-        # Pre-compare normalizer: expand abbreviations/numbers before similarity scoring.
-        # Built from config language if available, otherwise use default "ru".
-        _lang = getattr(config, "language", language) if config else language
-        self._pre_compare = _build_pre_compare_normalizer(_lang)
+
+        # Build checker pipeline from config.audio_check_checkers
+        from audiobook_generator.core.audio_checkers import build_checkers
+        if config is not None:
+            self._checkers = build_checkers(config)
+        else:
+            import types
+            _stub = types.SimpleNamespace(
+                audio_check_checkers=None,
+                audio_check_threshold=threshold,
+                audio_reference_check_command=None,
+                audio_reference_check_threshold=None,
+                audio_reference_check_timeout=None,
+                audio_reference_check_cache_dir=None,
+                audio_reference_check_stress=None,
+                language=language,
+                output_folder=str(output_folder),
+                ffmpeg_path=None,
+                prepared_text_folder=None,
+            )
+            self._checkers = build_checkers(_stub)
+
+        logger.info(
+            "Audio checker pipeline: %s",
+            ", ".join(c.name for c in self._checkers) or "(empty)",
+        )
+
+    # ------------------------------------------------------------------
+    # Backward-compatible _pre_compare proxy
+    # (tests set checker._pre_compare = fn to override the similarity normalizer)
+    # ------------------------------------------------------------------
+
+    @property
+    def _pre_compare(self):
+        from audiobook_generator.core.audio_checkers.whisper_similarity_checker import (
+            WhisperSimilarityChecker,
+        )
+        for c in self._checkers:
+            if isinstance(c, WhisperSimilarityChecker):
+                return c._pre_compare
+        return None
+
+    @_pre_compare.setter
+    def _pre_compare(self, value):
+        from audiobook_generator.core.audio_checkers.whisper_similarity_checker import (
+            WhisperSimilarityChecker,
+        )
+        for c in self._checkers:
+            if isinstance(c, WhisperSimilarityChecker):
+                c._pre_compare = value
+                return
 
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _coerce_optional_float(value) -> float | None:
-        if value in (None, ""):
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _coerce_timeout(value) -> int:
-        if value in (None, ""):
-            return 120
-        try:
-            return max(1, int(value))
-        except (TypeError, ValueError):
-            return 120
-
-    def _reference_check_enabled(self) -> bool:
-        return bool(self._reference_check_command)
-
     def _select_text_run_folder(self) -> Optional[Path]:
-        """Select the text run to use as the source of truth for audio_check."""
         if self._prepared_text_folder:
             folder = Path(self._prepared_text_folder)
             if not folder.is_absolute():
@@ -272,114 +202,7 @@ class AudioChecker:
             return folder if folder.exists() else None
 
         from audiobook_generator.utils.existing_chapters_loader import find_latest_run_folder
-
         return find_latest_run_folder(self.output_folder)
-
-    def _reference_check_command_parts(self) -> list[str]:
-        command = str(self._reference_check_command or "").strip()
-        if not command:
-            return []
-        command_path = command.strip("\"'")
-        if os.path.exists(command_path):
-            return [command_path]
-        return shlex.split(command, posix=(os.name != "nt"))
-
-    def _run_reference_check(self, audio_file: Path, original_text: str) -> dict:
-        """Run an external reference-audio checker and return its JSON payload.
-
-        Contract expected from the external tool:
-          stdout: one JSON object with at least {"status": "measured", "score": <number>}
-          exit code: 0 for a successful measurement, non-zero for tool errors
-
-        The external tool does not decide book-level quality by default.  This
-        class compares the returned score with audio_reference_check_threshold.
-        """
-        if not self._reference_check_enabled():
-            return {
-                "status": None,
-                "score": None,
-                "threshold": self._reference_check_threshold,
-                "payload": None,
-            }
-
-        parts = self._reference_check_command_parts()
-        if not parts:
-            raise RuntimeError("audio_reference_check_command is empty")
-
-        text_file = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                "w",
-                encoding="utf-8",
-                suffix=".txt",
-                delete=False,
-            ) as tmp:
-                tmp.write(original_text)
-                text_file = tmp.name
-
-            cmd = [
-                *parts,
-                "reference-compare",
-                "--audio",
-                str(audio_file),
-                "--text-file",
-                text_file,
-                "--language",
-                self.language,
-                "--json",
-                "--reference-stress",
-                str(self._reference_check_stress),
-            ]
-            if self._reference_check_cache_dir:
-                cmd.extend(["--cache-dir", str(self._reference_check_cache_dir)])
-            else:
-                cmd.extend([
-                    "--cache-dir",
-                    str(self.output_folder / "wav" / "_reference_cache"),
-                ])
-            if self._ffmpeg_path:
-                cmd.extend(["--ffmpeg-path", str(self._ffmpeg_path)])
-
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self._reference_check_timeout,
-                check=False,
-            )
-            stdout = proc.stdout.strip()
-            if proc.returncode != 0:
-                stderr = proc.stderr.strip()
-                raise RuntimeError(
-                    f"reference checker failed with exit code {proc.returncode}: {stderr or stdout}"
-                )
-            if not stdout:
-                raise RuntimeError("reference checker returned empty stdout")
-            payload = json.loads(stdout.splitlines()[-1])
-            score = payload.get("score")
-            if score is None:
-                raise RuntimeError("reference checker JSON has no score")
-            score_f = float(score)
-            threshold = self._reference_check_threshold
-            if threshold is None:
-                status = "measured"
-            else:
-                status = "suspicious" if score_f > threshold else "ok"
-            return {
-                "status": status,
-                "score": score_f,
-                "threshold": threshold,
-                "payload": payload,
-            }
-        finally:
-            if text_file:
-                try:
-                    Path(text_file).unlink(missing_ok=True)
-                except Exception:
-                    pass
 
     def _prepare_windows_cuda_runtime(self) -> None:
         if self._cuda_runtime_prepared or os.name != "nt" or str(self._device).lower() != "cuda":
@@ -408,10 +231,7 @@ class AudioChecker:
         if self._model is None:
             self._prepare_windows_cuda_runtime()
             from faster_whisper import WhisperModel  # type: ignore[import]
-            logger.info(
-                "Loading Whisper model '%s' on %s …",
-                self._model_size, self._device,
-            )
+            logger.info("Loading Whisper model '%s' on %s …", self._model_size, self._device)
             self._model = WhisperModel(
                 self._model_size,
                 device=self._device,
@@ -424,13 +244,12 @@ class AudioChecker:
         model = self._get_model()
         segments, _info = model.transcribe(
             str(wav_path),
-            language=self.language.split("-")[0],  # "ru-RU" → "ru"
+            language=self.language.split("-")[0],
             beam_size=5,
         )
         return " ".join(s.text for s in segments).strip()
 
     def _find_audio_file(self, chapter_key: str, sentence_hash: str) -> Optional[Path]:
-        """Find the audio file for a given chapter_key and hash. Returns None if not found."""
         chunks_dir = self.output_folder / "wav" / "chunks" / chapter_key
         for ext in _AUDIO_EXTENSIONS:
             p = chunks_dir / f"{sentence_hash}.{ext}"
@@ -439,7 +258,6 @@ class AudioChecker:
         return None
 
     def _is_cached_transcription_fresh(self, audio_file: Path, checked_at: str | None) -> bool:
-        """Return True when cached transcription is at least as new as the audio file."""
         if not checked_at:
             return False
         try:
@@ -451,23 +269,17 @@ class AudioChecker:
             return False
         return checked_dt >= audio_mtime
 
-    def _get_transcription(self, audio_file: Path, chapter_key: str, sentence_hash: str, store) -> str:
-        """Reuse cached raw transcription when possible, otherwise run Whisper.
-
-        Cache is considered valid when:
-          - a non-manual raw_transcription (or transcription) is stored, AND
-          - the cached entry is at least as recent as the audio file on disk.
-
-        If the audio file was re-synthesised after the last check, the cache is
-        stale and Whisper is re-run so the new audio is correctly evaluated.
-        """
+    def _get_transcription(
+        self, audio_file: Path, chapter_key: str, sentence_hash: str, store
+    ) -> str:
+        """Reuse cached transcription when possible, otherwise run Whisper."""
         cache_row = store.get_cached_transcription_entry(chapter_key, sentence_hash)
         if cache_row:
             cached_raw = cache_row["raw_transcription"] or None
             if not cached_raw:
-                legacy_transcription = (cache_row["transcription"] or "").strip()
-                if legacy_transcription and not legacy_transcription.startswith("[manual]"):
-                    cached_raw = legacy_transcription
+                legacy = (cache_row["transcription"] or "").strip()
+                if legacy and not legacy.startswith("[manual]"):
+                    cached_raw = legacy
             if cached_raw and self._is_cached_transcription_fresh(audio_file, cache_row["checked_at"]):
                 logger.debug(
                     "[%s] Hash %s – using cached transcription from chunk_cache",
@@ -481,40 +293,43 @@ class AudioChecker:
                 )
         return self._transcribe(audio_file)
 
+    def _normalize_transcription_for_storage(self, transcription: str) -> str:
+        """Return the compare-ready transcription shown in review/UI.
+
+        ``raw_transcription`` keeps the exact Whisper output.  This field stores
+        the deterministic pre-compare form (numbers / abbreviations expanded)
+        so users can see what the similarity checker actually compared.
+        """
+        pre_compare = self._pre_compare
+        if pre_compare is None:
+            return transcription
+        try:
+            normalized = pre_compare(transcription)
+        except Exception:
+            return transcription
+        return normalized or transcription
+
     # ------------------------------------------------------------------
 
     def run(self, store) -> dict[str, int]:
         """Check all synthesised audio chunks and mark disputed ones in *store*.
 
-        Uses a text-first approach:
-          1. Find latest text run folder (``text/<NNN>/``).
-          2. For each chapter .txt file, derive chapter_key from filename stem.
-          3. Split chapter text into sentences (same logic as ChunkedAudioGenerator).
-          4. For each sentence: compute hash → check FS → transcribe if found → compare.
-
-        Falls back to FS-only scan (wav/chunks/) when no text folder is found.
-
-        Returns counters: {"checked": N, "disputed": M, "skipped": K}.
+        Returns counters: ``{"checked": N, "disputed": M, "skipped": K}``.
         """
         from audiobook_generator.core.audio_chunk_store import AudioChunkStore
         assert isinstance(store, AudioChunkStore)
 
-        counters = {"checked": 0, "disputed": 0, "skipped": 0}
+        counters: dict[str, int] = {"checked": 0, "disputed": 0, "skipped": 0}
 
-        # --- Text-first approach -------------------------------------------
         from audiobook_generator.utils.existing_chapters_loader import load_chapters_from_run_folder
-        from audiobook_generator.utils.existing_chapters_loader import split_text_into_chunks
 
         run_folder = self._select_text_run_folder()
         if run_folder:
             chapters = load_chapters_from_run_folder(run_folder)
-            logger.info(
-                "Text-first mode: found %d chapters in %s", len(chapters), run_folder
-            )
+            logger.info("Text-first mode: found %d chapters in %s", len(chapters), run_folder)
             for chapter in chapters:
                 self._check_chapter_text_first(chapter, store, counters)
         else:
-            # Fallback: walk wav/chunks/ FS directly (no text files available)
             logger.warning(
                 "No text/ run folder found under %s — falling back to FS-only scan.",
                 self.output_folder,
@@ -528,7 +343,6 @@ class AudioChecker:
         return counters
 
     def _check_chapter_text_first(self, chapter, store, counters: dict) -> None:
-        """Check all sentences for a chapter using its text file as the source of truth."""
         try:
             text = Path(chapter.text_path).read_text(encoding="utf-8")
         except Exception as exc:
@@ -540,22 +354,17 @@ class AudioChecker:
 
         sentences = split_text_into_chunks(text, self.language.split("-")[0])
         chapter_key = chapter.chapter_key
-
-        logger.info(
-            "Chapter '%s': %d sentences to check.", chapter_key, len(sentences)
-        )
+        logger.info("Chapter '%s': %d sentences to check.", chapter_key, len(sentences))
 
         for sentence in sentences:
             s_hash = _sentence_hash(sentence)
             audio_file = self._find_audio_file(chapter_key, s_hash)
             if audio_file is None:
-                # Not synthesised yet — skip
                 counters["skipped"] += 1
                 continue
             self._check_one_file(audio_file, chapter_key, s_hash, sentence, store, counters)
 
     def _run_fs_fallback(self, store, counters: dict) -> None:
-        """Fallback: walk wav/chunks/<chapter_key>/*.* and look up text from DB."""
         wav_root = self.output_folder / "wav" / "chunks"
         if not wav_root.exists():
             logger.warning("No wav/chunks directory found at %s", wav_root)
@@ -592,8 +401,34 @@ class AudioChecker:
         store,
         counters: dict,
     ) -> None:
+        # ── 0. Skip only user-resolved chunks when audio has not changed ───
+        cache_row = store.get_cached_transcription_entry(chapter_key, sentence_hash)
+        if cache_row and not self.force:
+            existing_status = cache_row["status"]
+            if existing_status == STATUS_RESOLVED:
+                if self._is_cached_transcription_fresh(audio_file, cache_row["checked_at"]):
+                    logger.debug(
+                        "  [%s] Hash %s – status='%s', audio unchanged → skip user-resolved chunk.",
+                        chapter_key, sentence_hash[:10], existing_status,
+                    )
+                    counters["skipped"] += 1
+                    return
+                else:
+                    logger.debug(
+                        "  [%s] Hash %s – resolved chunk audio regenerated (newer than last check), re-checking.",
+                        chapter_key, sentence_hash[:10],
+                    )
+        elif cache_row and self.force:
+            logger.debug(
+                "  [%s] Hash %s – force enabled, ignoring cached status='%s'.",
+                chapter_key, sentence_hash[:10], cache_row["status"],
+            )
+
+        # ── 1. Transcribe (cached raw if available, otherwise Whisper) ──────
         try:
-            transcription = self._get_transcription(audio_file, chapter_key, sentence_hash, store)
+            transcription = self._get_transcription(
+                audio_file, chapter_key, sentence_hash, store
+            )
         except Exception as exc:
             logger.error(
                 "  [%s] Hash %s – transcription error: %s",
@@ -602,101 +437,78 @@ class AudioChecker:
             counters["skipped"] += 1
             return
 
-        orig_norm = _normalize_for_compare(original_text)
-        trans_norm = _normalize_for_compare(transcription)
+        # ── 2. Run checker pipeline ─────────────────────────────────────────
+        # Re-fetch cache_row so it reflects any transcription data just written
+        # (for checkers like ReferenceChecker that may use it).
+        chunk_cache_row = store.get_cached_transcription_entry(chapter_key, sentence_hash)
 
-        # Apply pre-compare semantic normalisation (expand abbreviations, numbers, dates …)
-        # to BOTH texts so they end up in the same spoken-word form before comparison.
-        #
-        # Why both?  Whisper consistently transcribes spoken numbers back to digit form
-        # ("тысяча семьсот девяносто четвёртого" → "1794").  _normalize_for_compare then
-        # strips those digits, leaving e.g. "августа года" while orig_norm still contains
-        # "тысяча семьсот девяносто четвёртого" — similarity collapses.
-        # Applying the same ru_numbers / ru_abbreviations chain to the transcription
-        # converts Whisper's "5 августа 1794 года" back to the fully-spelled form so both
-        # sides are comparable on equal footing.
-        if self._pre_compare is not None:
-            orig_norm = _normalize_for_compare(self._pre_compare(original_text))
-            trans_norm = _normalize_for_compare(self._pre_compare(transcription))
+        is_disputed = False
+        similarity_agg: Optional[float] = None
+        ref_score: Optional[float] = None
+        ref_threshold: Optional[float] = None
+        ref_status: Optional[str] = None
+        ref_payload: Optional[dict] = None
+        for checker in self._checkers:
+            try:
+                result = checker.check(
+                    audio_file, original_text, transcription, chunk_cache_row
+                )
+            except Exception as exc:
+                logger.warning(
+                    "  [%s] Hash %s – checker %r error: %s",
+                    chapter_key, sentence_hash[:10], checker.name, exc,
+                )
+                continue
 
-        sim = _similarity(orig_norm, trans_norm)
+            if result.disputed:
+                is_disputed = True
+
+            # Collect per-checker extras (first non-None wins per field)
+            if result.similarity is not None and similarity_agg is None:
+                similarity_agg = result.similarity
+            if result.reference_check_score is not None and ref_score is None:
+                ref_score = result.reference_check_score
+                ref_threshold = result.reference_check_threshold
+                ref_status = result.reference_check_status
+                ref_payload = result.reference_check_payload
+
+        # ── 3. Determine similarity to store ───────────────────────────────
+        # Store the actual whisper similarity (or 1.0 if no similarity checker).
+        # Disputed state is now communicated via the DB `status` column, not by
+        # forcing similarity=0.0, so boundary failures no longer need the hack.
+        sim_to_store = similarity_agg if similarity_agg is not None else 1.0
 
         counters["checked"] += 1
-
-        # Log disputed/ok for visibility; actual disputed status is computed
-        # dynamically in the Review UI by comparing similarity against the
-        # configured threshold — no static label is written to the DB.
-        status_label = "DISPUTED" if sim < self.threshold else "ok"
-        is_disputed = sim < self.threshold
-        logger.info(
-            "  [%s] %s  sim=%.2f  %s | orig: %s",
-            chapter_key, sentence_hash[:10], sim, status_label, original_text[:60],
-        )
         if is_disputed:
             counters["disputed"] += 1
 
-        reference_check = {
-            "status": None,
-            "score": None,
-            "threshold": self._reference_check_threshold,
-            "payload": None,
-        }
-        if self._reference_check_enabled():
-            try:
-                reference_check = self._run_reference_check(audio_file, original_text)
-                counters.setdefault("reference_checked", 0)
-                counters.setdefault("reference_suspicious", 0)
-                counters["reference_checked"] += 1
-                if reference_check["status"] == "suspicious":
-                    counters["reference_suspicious"] += 1
-                    if not is_disputed:
-                        counters["disputed"] += 1
-                        is_disputed = True
-                logger.info(
-                    "  [%s] %s  reference_score=%s  reference_status=%s",
-                    chapter_key,
-                    sentence_hash[:10],
-                    (
-                        f"{reference_check['score']:.4f}"
-                        if reference_check["score"] is not None
-                        else "n/a"
-                    ),
-                    reference_check["status"],
-                )
-            except Exception as exc:
-                counters.setdefault("reference_errors", 0)
-                counters["reference_errors"] += 1
-                reference_check = {
-                    "status": "error",
-                    "score": None,
-                    "threshold": self._reference_check_threshold,
-                    "payload": {"error": str(exc)},
-                }
-                logger.warning(
-                    "  [%s] %s  reference-check error: %s",
-                    chapter_key,
-                    sentence_hash[:10],
-                    exc,
-                )
+        status_label = "DISPUTED" if is_disputed else "ok"
+        logger.info(
+            "  [%s] %s  sim=%.2f  %s | orig: %s",
+            chapter_key, sentence_hash[:10], sim_to_store, status_label, original_text[:60],
+        )
 
-        # Always persist the similarity score so the Review UI can dynamically
-        # re-classify entries when the threshold changes.
-        store.save_checked_chunk(
+        # ── 4. Persist ──────────────────────────────────────────────────────
+        ref_payload_json = (
+            json.dumps(ref_payload, ensure_ascii=False) if ref_payload is not None else None
+        )
+        transcription_for_storage = self._normalize_transcription_for_storage(transcription)
+        save_kwargs = dict(
             chapter_key=chapter_key,
             sentence_hash=sentence_hash,
             original_text=original_text,
-            transcription=transcription,
-            similarity=sim,
+            transcription=transcription_for_storage,
+            similarity=sim_to_store,
             raw_transcription=transcription,
-            reference_check_score=reference_check["score"],
-            reference_check_threshold=reference_check["threshold"],
-            reference_check_status=reference_check["status"],
-            reference_check_payload=(
-                json.dumps(reference_check["payload"], ensure_ascii=False)
-                if reference_check["payload"] is not None
-                else None
-            ),
+            reference_check_score=ref_score,
+            reference_check_threshold=ref_threshold,
+            reference_check_status=ref_status,
+            reference_check_payload=ref_payload_json,
         )
+        if is_disputed:
+            store.save_disputed_chunk(force_status=self.force, **save_kwargs)
+        else:
+            store.save_checked_chunk(force_status=self.force, **save_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -734,23 +546,47 @@ def main():
         "--device", default="cpu",
         help="Inference device: cpu or cuda (default: cpu).",
     )
+    parser.add_argument(
+        "--checkers", default=None,
+        help="Comma-separated checker names to run (default: whisper_similarity,first_word,last_word).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run checks and overwrite stored status in the DB even for previously resolved chunks.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    import types
+    _cfg = types.SimpleNamespace(
+        audio_check_checkers=args.checkers,
+        audio_check_force=args.force,
+        audio_check_threshold=args.threshold,
+        audio_reference_check_command=None,
+        audio_reference_check_threshold=None,
+        audio_reference_check_timeout=None,
+        audio_reference_check_cache_dir=None,
+        audio_reference_check_stress=None,
+        language=args.language,
+        output_folder=args.output_folder,
+        ffmpeg_path=None,
+        prepared_text_folder=None,
+    )
+
     output_folder = Path(args.output_folder).resolve()
     store = _build_store(output_folder)
-
     checker = AudioChecker(
         output_folder=output_folder,
         model_size=args.model,
         language=args.language,
         threshold=args.threshold,
         device=args.device,
+        config=_cfg,
     )
     checker.run(store)
 
 
 if __name__ == "__main__":
     main()
-
