@@ -13,7 +13,6 @@ from audiobook_generator.core.audio_checkers.base_audio_chunk_checker import (
     BaseAudioChunkChecker,
     CheckResult,
     normalize_for_compare,
-    normalize_for_phonetic_compare,
     similarity,
 )
 
@@ -156,11 +155,4 @@ class WhisperSimilarityChecker(BaseAudioChunkChecker):
         orig_norm = normalize_for_compare(orig_prepared)
         trans_norm = normalize_for_compare(trans_prepared)
         sim = similarity(orig_norm, trans_norm)
-
-        # Keep the regular similarity score, but allow a second pass with the
-        # narrow phonetic key so short chunks are not falsely disputed by
-        # harmless Whisper variants like "век" -> "вег".
-        orig_phon = normalize_for_phonetic_compare(orig_prepared)
-        trans_phon = normalize_for_phonetic_compare(trans_prepared)
-        sim = max(sim, similarity(orig_phon, trans_phon))
         return CheckResult(disputed=sim < self.threshold, similarity=sim)

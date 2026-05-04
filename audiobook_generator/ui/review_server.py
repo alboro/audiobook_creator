@@ -748,7 +748,7 @@ async def get_chunk_check_details(dir: str, chapter_key: str, hash: str):
         return {"checker_results": {}}
 
     store = AudioChunkStore(db_path)
-    checker_names = _get_configured_checker_names()
+    checker_names = _get_all_checker_names()
 
     cache_row = store.get_chunk_cache_full_row(chapter_key, hash)
     if not cache_row:
@@ -812,7 +812,7 @@ async def get_disputed(dir: str, chapter_key: str, threshold: float = 0.70):
     store = AudioChunkStore(db_path)
     rows = store.get_disputed_chunks(chapter_key, threshold=threshold)
     cfg = _get_effective_cfg()
-    checker_names = _get_configured_checker_names()
+    checker_names = _get_all_checker_names()
     checker_classes = [(n, _get_checker_class(n)) for n in checker_names]
     result = []
     for r in rows:
