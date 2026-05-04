@@ -791,8 +791,8 @@ def _run_audio_auto(config):
 
     _log = _logging.getLogger(__name__)
 
-    auto_threshold = float(getattr(config, "audio_auto_check_threshold", None) or 0.78)
-    max_retry = int(getattr(config, "audio_auto_retry", None) or 5)
+    auto_threshold = config.audio_auto_check_threshold or 0.78
+    max_retry = config.audio_auto_retry or 5
 
     output_folder = _Path(config.output_folder).resolve()
     db_path = output_folder / "wav" / "_state" / "audio_chunks.sqlite3"

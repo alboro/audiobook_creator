@@ -592,14 +592,18 @@ async def get_settings():
     except (TypeError, ValueError):
         threshold = 0.70
 
-    # Checker names configured in [audio_check] audio_check_checkers
-    checker_names = _get_configured_checker_names()
+    # All known checker names (from registry) — used by UI filter bar.
+    # Configured checkers (subset actually run) are separate.
+    checker_names = _get_all_checker_names()
 
     return {"audio_check_threshold": threshold, "checker_names": checker_names}
 
 
 def _get_configured_checker_names() -> list[str]:
-    """Return ordered checker names from config, falling back to DEFAULT_CHECKERS."""
+    """Return ordered checker names from config, falling back to DEFAULT_CHECKERS.
+
+    Used by the checker pipeline to know *which* checkers to actually run.
+    """
     from audiobook_generator.core.audio_checkers.base_audio_chunk_checker import DEFAULT_CHECKERS
     cfg = getattr(app.state, "review_config", None)
     spec = getattr(cfg, "audio_check_checkers", None)
@@ -611,6 +615,18 @@ def _get_configured_checker_names() -> list[str]:
             pass
     spec = (spec or DEFAULT_CHECKERS).strip()
     return [n.strip() for n in spec.split(",") if n.strip()]
+
+
+def _get_all_checker_names() -> list[str]:
+    """Return all checker names registered in AUDIO_CHECKER_REGISTRY.
+
+    Used by the UI filter bar so every known checker is shown regardless of
+    which ones are active in the current config.
+    """
+    from audiobook_generator.core.audio_checkers.base_audio_chunk_checker import (
+        AUDIO_CHECKER_REGISTRY,
+    )
+    return list(AUDIO_CHECKER_REGISTRY.keys())
 
 
 def _get_effective_cfg():

@@ -1,8 +1,42 @@
 class GeneralConfig:
     def __init__(self, args):
+        # ------------------------------------------------------------------ #
+        # Internal helper: read a field from args (already INI-merged),       #
+        # apply optional type coercion, and fall back to a built-in default.  #
+        #                                                                      #
+        # coerce=int / float  — try numeric conversion; return default on err  #
+        # coerce=bool         — handles Python bool, "true"/"false" strings    #
+        #   default=True  → anything that is NOT explicitly 'false'/'0'/'no'  #
+        #   default=False → only explicit 'true'/'1'/'yes' returns True       #
+        # ------------------------------------------------------------------ #
+        def _get(field, coerce=None, default=None):
+            val = getattr(args, field, None)
+            if val is None:
+                return default
+            if coerce is None:
+                return val
+            if coerce is int:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    return default
+            if coerce is float:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return default
+            if coerce is bool:
+                if isinstance(val, bool):
+                    return val
+                s = str(val).lower()
+                if default is True:
+                    return s not in ('false', '0', 'no')
+                return s in ('true', '1', 'yes')
+            return coerce(val)
+
         # General arguments
-        self.input_file = getattr(args, 'input_file', None)
-        self.output_folder = getattr(args, 'output_folder', None)
+        self.input_file = _get('input_file')
+        self.output_folder = _get('output_folder')
 
         # Default output_folder: a directory named after the book, next to the input file.
         # e.g. /path/to/MyBook.epub  →  /path/to/MyBook/
@@ -12,216 +46,175 @@ class GeneralConfig:
             self.output_folder = str(_input.parent / _input.stem)
 
         # Generation mode: prepare | audio | package | all
-        self.mode = getattr(args, 'mode', None)
-        self.output_text = getattr(args, 'output_text', None)
-        self.prepared_text_folder = getattr(args, 'prepared_text_folder', None)
-        self.log = getattr(args, 'log', None)
+        self.mode = _get('mode')
+        self.output_text = _get('output_text')
+        self.prepared_text_folder = _get('prepared_text_folder')
+        self.log = _get('log')
         self.log_file = None
-        self.no_prompt = getattr(args, 'no_prompt', None)
-        self.worker_count = getattr(args, 'worker_count', None)
-        self.use_pydub_merge = getattr(args, 'use_pydub_merge', None)
-        self.force_new_run = getattr(args, 'force_new_run', None)
-        self.package_m4b = getattr(args, 'package_m4b', None)
-        self.chunked_audio = getattr(args, 'chunked_audio', None)
-        self.chunked_audio_no_db = getattr(args, 'chunked_audio_no_db', False) or False
-        self.audio_worker_interval = getattr(args, 'audio_worker_interval', None)
-        self.audio_folder = getattr(args, 'audio_folder', None)
-        self.m4b_filename = getattr(args, 'm4b_filename', None)
-        self.m4b_bitrate = getattr(args, 'm4b_bitrate', None)
-        self.chapter_titles_file = getattr(args, 'chapter_titles_file', None)
-        self.cover_image = getattr(args, 'cover_image', None)
-        self.ffmpeg_path = getattr(args, 'ffmpeg_path', None)
+        self.no_prompt = _get('no_prompt')
+        self.worker_count = _get('worker_count')
+        self.use_pydub_merge = _get('use_pydub_merge')
+        self.force_new_run = _get('force_new_run')
+        self.package_m4b = _get('package_m4b')
+        self.chunked_audio = _get('chunked_audio')
+        self.chunked_audio_no_db = _get('chunked_audio_no_db', bool, False)
+        self.audio_worker_interval = _get('audio_worker_interval')
+        self.audio_folder = _get('audio_folder')
+        self.m4b_filename = _get('m4b_filename')
+        self.m4b_bitrate = _get('m4b_bitrate')
+        self.chapter_titles_file = _get('chapter_titles_file')
+        self.cover_image = _get('cover_image')
+        self.ffmpeg_path = _get('ffmpeg_path')
 
         # Book parser specific arguments
-        self.title_mode = getattr(args, 'title_mode', None)
-        self.chapter_mode = getattr(args, 'chapter_mode', None)
-        self.newline_mode = getattr(args, 'newline_mode', None)
-        self.chapter_start = getattr(args, 'chapter_start', None)
-        self.chapter_end = getattr(args, 'chapter_end', None)
-        self.search_and_replace_file = getattr(args, 'search_and_replace_file', None)
+        self.title_mode = _get('title_mode')
+        self.chapter_mode = _get('chapter_mode')
+        self.newline_mode = _get('newline_mode')
+        self.chapter_start = _get('chapter_start')
+        self.chapter_end = _get('chapter_end')
+        self.search_and_replace_file = _get('search_and_replace_file')
 
         # TTS provider: common arguments
-        self.tts = getattr(args, 'tts', None)
-        self.language = getattr(args, 'language', None)
-        self.voice_name = getattr(args, 'voice_name', None)
-        self.voice_name2 = getattr(args, 'voice_name2', None)
-        self.output_format = getattr(args, 'output_format', None)
-        self.model_name = getattr(args, 'model_name', None)
-        self.tts_trailing_strip_chars = getattr(args, 'tts_trailing_strip_chars', None)
-        self.tts_log_text = getattr(args, 'tts_log_text', False) or False
-        _trim = getattr(args, 'tts_trim_silence', None)
+        self.tts = _get('tts')
+        self.language = _get('language')
+        self.voice_name = _get('voice_name')
+        self.voice_name2 = _get('voice_name2')
+        self.output_format = _get('output_format')
+        self.model_name = _get('model_name')
+        self.tts_trailing_strip_chars = _get('tts_trailing_strip_chars')
+        self.tts_log_text = _get('tts_log_text', bool, False)
         # Default is True; only explicitly setting "false" (string or bool) disables it.
-        self.tts_trim_silence = str(_trim).lower() != 'false' if _trim is not None else True
+        self.tts_trim_silence = _get('tts_trim_silence', bool, True)
         # Smooth chunk joining: crossfade chunk boundaries to eliminate crackling.
         # Default: True. Disable for lowest-latency pure-concatenation.
-        _smooth = getattr(args, 'tts_chunk_smooth_join', None)
-        self.tts_chunk_smooth_join = str(_smooth).lower() != 'false' if _smooth is not None else True
-        _smooth_ms = getattr(args, 'tts_chunk_smooth_join_ms', None)
-        try:
-            self.tts_chunk_smooth_join_ms = int(_smooth_ms) if _smooth_ms is not None else 30
-        except (TypeError, ValueError):
-            self.tts_chunk_smooth_join_ms = 30
+        self.tts_chunk_smooth_join = _get('tts_chunk_smooth_join', bool, True)
+        self.tts_chunk_smooth_join_ms = _get('tts_chunk_smooth_join_ms', int, 30)
         # DC offset removal: subtract per-chunk mean before merging (default: True).
-        _dc = getattr(args, 'tts_chunk_dc_remove', None)
-        self.tts_chunk_dc_remove = str(_dc).lower() != 'false' if _dc is not None else True
+        self.tts_chunk_dc_remove = _get('tts_chunk_dc_remove', bool, True)
         # Silence gap between chunks at merge time, ms (default: 0 = disabled).
-        _gap = getattr(args, 'tts_chunk_merge_gap_ms', None)
-        try:
-            self.tts_chunk_merge_gap_ms = int(_gap) if _gap is not None else 0
-        except (TypeError, ValueError):
-            self.tts_chunk_merge_gap_ms = 0
+        self.tts_chunk_merge_gap_ms = _get('tts_chunk_merge_gap_ms', int, 0)
         # CosyVoice can emit a short click/burst at the beginning of generated
         # chunks. This optional pass removes only the chunk head before merging.
-        _declick = getattr(args, 'tts_chunk_declick_start', None)
-        self.tts_chunk_declick_start = (
-            str(_declick).lower() == 'true' if _declick is not None else False
-        )
-        _declick_ms = getattr(args, 'tts_chunk_declick_start_ms', None)
-        try:
-            self.tts_chunk_declick_start_ms = int(_declick_ms) if _declick_ms is not None else 10
-        except (ValueError, TypeError):
-            self.tts_chunk_declick_start_ms = 10
-        _declick_fade_ms = getattr(args, 'tts_chunk_declick_fade_ms', None)
-        try:
-            self.tts_chunk_declick_fade_ms = int(_declick_fade_ms) if _declick_fade_ms is not None else 6
-        except (ValueError, TypeError):
-            self.tts_chunk_declick_fade_ms = 6
+        self.tts_chunk_declick_start = _get('tts_chunk_declick_start', bool, False)
+        self.tts_chunk_declick_start_ms = _get('tts_chunk_declick_start_ms', int, 10)
+        self.tts_chunk_declick_fade_ms = _get('tts_chunk_declick_fade_ms', int, 6)
         # Low-frequency preamble detection and removal.  Some TTS engines
         # (e.g., CosyVoice) can emit a short low-frequency "breath/ock" burst
         # before the first actual phoneme.  Enabling this pass detects and
         # removes that preamble by analysing ZCR and spectral concentration.
-        _lf_preamble = getattr(args, 'tts_chunk_declick_lf_preamble', None)
-        self.tts_chunk_declick_lf_preamble = (
-            str(_lf_preamble).lower() == 'true' if _lf_preamble is not None else False
-        )
-        _lf_fade_ms = getattr(args, 'tts_chunk_declick_lf_preamble_fade_ms', None)
-        try:
-            self.tts_chunk_declick_lf_preamble_fade_ms = int(_lf_fade_ms) if _lf_fade_ms is not None else 8
-        except (ValueError, TypeError):
-            self.tts_chunk_declick_lf_preamble_fade_ms = 8
-        self.openai_api_key = getattr(args, 'openai_api_key', None)
-        self.openai_base_url = getattr(args, 'openai_base_url', None)
-        self.openai_max_chars = getattr(args, 'openai_max_chars', None)
-        self.openai_enable_polling = getattr(args, 'openai_enable_polling', None)
-        self.openai_submit_url = getattr(args, 'openai_submit_url', None)
-        self.openai_status_url_template = getattr(args, 'openai_status_url_template', None)
-        self.openai_download_url_template = getattr(args, 'openai_download_url_template', None)
-        self.openai_job_id_path = getattr(args, 'openai_job_id_path', None)
-        self.openai_job_status_path = getattr(args, 'openai_job_status_path', None)
-        self.openai_job_download_url_path = getattr(args, 'openai_job_download_url_path', None)
-        self.openai_job_done_values = getattr(args, 'openai_job_done_values', None)
-        self.openai_job_failed_values = getattr(args, 'openai_job_failed_values', None)
-        self.openai_poll_interval = getattr(args, 'openai_poll_interval', None)
-        self.openai_poll_timeout = getattr(args, 'openai_poll_timeout', None)
-        self.openai_poll_request_timeout = getattr(args, 'openai_poll_request_timeout', None)
-        self.openai_poll_max_errors = getattr(args, 'openai_poll_max_errors', None)
-        self.openai_submit_omit_fields = getattr(args, 'openai_submit_omit_fields', None)
-        self.openai_submit_extra_fields = getattr(args, 'openai_submit_extra_fields', None)
+        self.tts_chunk_declick_lf_preamble = _get('tts_chunk_declick_lf_preamble', bool, False)
+        self.tts_chunk_declick_lf_preamble_fade_ms = _get('tts_chunk_declick_lf_preamble_fade_ms', int, 8)
+
+        self.openai_api_key = _get('openai_api_key')
+        self.openai_base_url = _get('openai_base_url')
+        self.openai_max_chars = _get('openai_max_chars')
+        self.openai_enable_polling = _get('openai_enable_polling')
+        self.openai_submit_url = _get('openai_submit_url')
+        self.openai_status_url_template = _get('openai_status_url_template')
+        self.openai_download_url_template = _get('openai_download_url_template')
+        self.openai_job_id_path = _get('openai_job_id_path')
+        self.openai_job_status_path = _get('openai_job_status_path')
+        self.openai_job_download_url_path = _get('openai_job_download_url_path')
+        self.openai_job_done_values = _get('openai_job_done_values')
+        self.openai_job_failed_values = _get('openai_job_failed_values')
+        self.openai_poll_interval = _get('openai_poll_interval')
+        self.openai_poll_timeout = _get('openai_poll_timeout')
+        self.openai_poll_request_timeout = _get('openai_poll_request_timeout')
+        self.openai_poll_max_errors = _get('openai_poll_max_errors')
+        self.openai_submit_omit_fields = _get('openai_submit_omit_fields')
+        self.openai_submit_extra_fields = _get('openai_submit_extra_fields')
 
         # OpenAI specific arguments
-        self.instructions = getattr(args, 'instructions', None)
-        self.speed = getattr(args, 'speed', None)
+        self.instructions = _get('instructions')
+        self.speed = _get('speed')
 
         # Normalizer specific arguments
-        self.normalize = getattr(args, 'normalize', None)
-        self.normalize_steps = getattr(args, 'normalize_steps', None)
-        self.normalize_provider = getattr(args, 'normalize_provider', None)
-        self.normalize_model = getattr(args, 'normalize_model', None)
-        self.normalize_system_prompt = getattr(args, 'normalize_system_prompt', None)
-        self.normalize_prompt_file = getattr(args, 'normalize_prompt_file', None)
-        self.normalize_system_prompt_file = getattr(args, 'normalize_system_prompt_file', None)
-        self.normalize_user_prompt_file = getattr(args, 'normalize_user_prompt_file', None)
-        self.normalize_api_key = getattr(args, 'normalize_api_key', None)
-        self.normalize_base_url = getattr(args, 'normalize_base_url', None)
-        self.normalize_max_chars = getattr(args, 'normalize_max_chars', None)
-        self.normalize_tts_safe_max_chars = getattr(args, 'normalize_tts_safe_max_chars', None)
-        self.normalize_tts_safe_comma_as_period = getattr(args, 'normalize_tts_safe_comma_as_period', None)
+        self.normalize = _get('normalize')
+        self.normalize_steps = _get('normalize_steps')
+        self.normalize_provider = _get('normalize_provider')
+        self.normalize_model = _get('normalize_model')
+        self.normalize_system_prompt = _get('normalize_system_prompt')
+        self.normalize_prompt_file = _get('normalize_prompt_file')
+        self.normalize_system_prompt_file = _get('normalize_system_prompt_file')
+        self.normalize_user_prompt_file = _get('normalize_user_prompt_file')
+        self.normalize_api_key = _get('normalize_api_key')
+        self.normalize_base_url = _get('normalize_base_url')
+        self.normalize_max_chars = _get('normalize_max_chars')
+        self.normalize_tts_safe_max_chars = _get('normalize_tts_safe_max_chars')
+        self.normalize_tts_safe_comma_as_period = _get('normalize_tts_safe_comma_as_period')
         self.normalize_tts_pronunciation_overrides_file = (
-            getattr(args, 'normalize_tts_pronunciation_overrides_file', None)
-            or getattr(args, 'normalize_pronunciation_exceptions_file', None)
+            _get('normalize_tts_pronunciation_overrides_file')
+            or _get('normalize_pronunciation_exceptions_file')
         )
         self.normalize_pronunciation_exceptions_file = self.normalize_tts_pronunciation_overrides_file
-        self.normalize_tts_pronunciation_overrides_words = getattr(
-            args, 'normalize_tts_pronunciation_overrides_words', None
+        self.normalize_tts_pronunciation_overrides_words = _get(
+            'normalize_tts_pronunciation_overrides_words'
         )
-        self.normalize_pronunciation_lexicon_db = getattr(
-            args, 'normalize_pronunciation_lexicon_db', None
-        )
+        self.normalize_pronunciation_lexicon_db = _get('normalize_pronunciation_lexicon_db')
         # normalize_stress_exceptions_file: removed (replaced by normalize_stress_paradox_words)
-        self.normalize_stress_ambiguity_file = getattr(
-            args, 'normalize_stress_ambiguity_file', None
-        )
-        self.normalize_tsnorm_stress_yo = getattr(args, 'normalize_tsnorm_stress_yo', None)
-        self.normalize_tsnorm_stress_monosyllabic = getattr(
-            args, 'normalize_tsnorm_stress_monosyllabic', None
-        )
-        self.normalize_tsnorm_min_word_length = getattr(
-            args, 'normalize_tsnorm_min_word_length', None
-        )
-        self.normalize_stress_paradox_words = getattr(
-            args, 'normalize_stress_paradox_words', None
-        )
-        self.normalize_log_changes = getattr(args, 'normalize_log_changes', None)
-        self.normalize_stress_ambiguity_system_prompt = getattr(
-            args, 'normalize_stress_ambiguity_system_prompt', None
-        )
-        self.normalize_safe_split_system_prompt = getattr(
-            args, 'normalize_safe_split_system_prompt', None
-        )
-        self.normalize_reasoning_effort = getattr(
-            args, 'normalize_reasoning_effort', None
-        )
+        self.normalize_stress_ambiguity_file = _get('normalize_stress_ambiguity_file')
+        self.normalize_tsnorm_stress_yo = _get('normalize_tsnorm_stress_yo')
+        self.normalize_tsnorm_stress_monosyllabic = _get('normalize_tsnorm_stress_monosyllabic')
+        self.normalize_tsnorm_min_word_length = _get('normalize_tsnorm_min_word_length')
+        self.normalize_stress_paradox_words = _get('normalize_stress_paradox_words')
+        self.normalize_log_changes = _get('normalize_log_changes')
+        self.normalize_stress_ambiguity_system_prompt = _get('normalize_stress_ambiguity_system_prompt')
+        self.normalize_safe_split_system_prompt = _get('normalize_safe_split_system_prompt')
+        self.normalize_reasoning_effort = _get('normalize_reasoning_effort')
 
         # TTS provider: Azure & Edge TTS specific arguments
-        self.break_duration = getattr(args, 'break_duration', None)
+        self.break_duration = _get('break_duration')
 
         # TTS provider: Edge specific arguments
-        self.voice_rate = getattr(args, 'voice_rate', None)
-        self.voice_volume = getattr(args, 'voice_volume', None)
-        self.voice_pitch = getattr(args, 'voice_pitch', None)
-        self.proxy = getattr(args, 'proxy', None)
+        self.voice_rate = _get('voice_rate')
+        self.voice_volume = _get('voice_volume')
+        self.voice_pitch = _get('voice_pitch')
+        self.proxy = _get('proxy')
 
         # TTS provider: Piper specific arguments
-        self.piper_path = getattr(args, 'piper_path', None)
-        self.piper_docker_image = getattr(args, 'piper_docker_image', None)
-        self.piper_speaker = getattr(args, 'piper_speaker', None)
-        self.piper_noise_scale = getattr(args, 'piper_noise_scale', None)
-        self.piper_noise_w_scale = getattr(args, 'piper_noise_w_scale', None)
-        self.piper_length_scale = getattr(args, 'piper_length_scale', None)
-        self.piper_sentence_silence = getattr(args, 'piper_sentence_silence', None)
+        self.piper_path = _get('piper_path')
+        self.piper_docker_image = _get('piper_docker_image')
+        self.piper_speaker = _get('piper_speaker')
+        self.piper_noise_scale = _get('piper_noise_scale')
+        self.piper_noise_w_scale = _get('piper_noise_w_scale')
+        self.piper_length_scale = _get('piper_length_scale')
+        self.piper_sentence_silence = _get('piper_sentence_silence')
 
         # TTS provider: Qwen3 specific arguments
-        self.qwen_api_key = getattr(args, 'qwen_api_key', None)
-        self.qwen_language_type = getattr(args, 'qwen_language_type', None)
-        self.qwen_stream = getattr(args, 'qwen_stream', None)
-        self.qwen_request_timeout = getattr(args, 'qwen_request_timeout', None)
+        self.qwen_api_key = _get('qwen_api_key')
+        self.qwen_language_type = _get('qwen_language_type')
+        self.qwen_stream = _get('qwen_stream')
+        self.qwen_request_timeout = _get('qwen_request_timeout')
 
         # TTS provider: Gemini specific arguments
-        self.gemini_api_key = getattr(args, 'gemini_api_key', None)
-        self.gemini_sample_rate = getattr(args, 'gemini_sample_rate', None)
-        self.gemini_channels = getattr(args, 'gemini_channels', None)
-        self.gemini_audio_encoding = getattr(args, 'gemini_audio_encoding', None)
-        self.gemini_temperature = getattr(args, 'gemini_temperature', None)
-        self.gemini_speaker_map = getattr(args, 'gemini_speaker_map', None)
+        self.gemini_api_key = _get('gemini_api_key')
+        self.gemini_sample_rate = _get('gemini_sample_rate')
+        self.gemini_channels = _get('gemini_channels')
+        self.gemini_audio_encoding = _get('gemini_audio_encoding')
+        self.gemini_temperature = _get('gemini_temperature')
+        self.gemini_speaker_map = _get('gemini_speaker_map')
 
         # TTS provider: Kokoro specific arguments
-        self.kokoro_base_url = getattr(args, 'kokoro_base_url', None)
-        self.kokoro_volume_multiplier = getattr(args, 'kokoro_volume_multiplier', None)
+        self.kokoro_base_url = _get('kokoro_base_url')
+        self.kokoro_volume_multiplier = _get('kokoro_volume_multiplier')
 
         # Audio check specific arguments
-        self.audio_check_model = getattr(args, 'audio_check_model', None)
-        self.audio_check_threshold = getattr(args, 'audio_check_threshold', None)
-        self.audio_check_device = getattr(args, 'audio_check_device', None)
-        self.audio_check_force = getattr(args, 'audio_check_force', None)
+        self.audio_check_model = _get('audio_check_model')
+        self.audio_check_threshold = _get('audio_check_threshold', float)
+        self.audio_check_device = _get('audio_check_device')
+        self.audio_check_force = _get('audio_check_force')
         # Comma-separated list of checker names to run (see AUDIO_CHECKER_REGISTRY).
         # Default: whisper_similarity,first_word,last_word
         # Full set:  whisper_similarity,first_word,last_word,reference
-        self.audio_check_checkers = getattr(args, 'audio_check_checkers', None)
-        self.audio_reference_check_command = getattr(args, 'audio_reference_check_command', None)
-        self.audio_reference_check_threshold = getattr(args, 'audio_reference_check_threshold', None)
-        self.audio_reference_check_timeout = getattr(args, 'audio_reference_check_timeout', None)
-        self.audio_reference_check_cache_dir = getattr(args, 'audio_reference_check_cache_dir', None)
-        self.audio_reference_check_stress = getattr(args, 'audio_reference_check_stress', None)
+        self.audio_check_checkers = _get('audio_check_checkers')
+        # Auto-loop thresholds (used by --mode audio_auto).
+        self.audio_auto_check_threshold = _get('audio_auto_check_threshold', float)
+        self.audio_auto_retry = _get('audio_auto_retry', int)
+        self.audio_reference_check_command = _get('audio_reference_check_command')
+        self.audio_reference_check_threshold = _get('audio_reference_check_threshold', float)
+        self.audio_reference_check_timeout = _get('audio_reference_check_timeout', int)
+        self.audio_reference_check_cache_dir = _get('audio_reference_check_cache_dir')
+        self.audio_reference_check_stress = _get('audio_reference_check_stress')
 
         # Dynamic per-normalizer model overrides: normalize_{step}_model
         # These are set by merge_ini_into_args for any key in INI that matches the pattern.
