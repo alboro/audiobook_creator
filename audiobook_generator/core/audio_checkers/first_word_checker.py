@@ -77,6 +77,11 @@ class FirstWordChecker(BaseAudioChunkChecker):
 
         disputed = not starts_with_boundary_word(orig_words[0], trans)
         if disputed:
+            # Whisper sometimes inserts a spurious space inside a word
+            # (e.g. "под мрачным" for "подмрачным").  Retry on spaceless
+            # transcription as a last-resort tolerance.
+            disputed = not starts_with_boundary_word(orig_words[0], trans.replace(" ", ""))
+        if disputed:
             logger.debug(
                 "first_word mismatch: orig=%r  trans=%r",
                 orig_words[0],

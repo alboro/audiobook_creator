@@ -1054,7 +1054,19 @@ function reviewApp() {
         if (!r.ok) throw new Error(await r.text());
         const data = await r.json();
         const newHash = data.new_hash;
+        const oldHash = c.hash;
         this.chunks[i] = { ...c, text: this.editText, hash: newHash, has_audio: false };
+        this.chunks = [...this.chunks];
+        // If the original chunk was disputed, keep the new chunk disputed so it
+        // stays in the review queue after re-synthesis.
+        if (data.marked_disputed) {
+          const entry = this.disputedMap[oldHash] || { transcription: '', checker_results: {} };
+          delete this.disputedMap[oldHash];
+          this.disputedMap[newHash] = { ...entry, hash: newHash, checker_results: {} };
+          this.disputedMap = { ...this.disputedMap };
+          delete this.checkerDetailsMap[oldHash];
+          this._recomputeDisputeFilter();
+        }
         this.chunks = [...this.chunks];
         this.cancelEdit();
         this.st('Saved');
@@ -1111,7 +1123,7 @@ function reviewApp() {
       const dd = String(d.getDate()).padStart(2, '0');
       const hh = String(d.getHours()).padStart(2, '0');
       const mm = String(d.getMinutes()).padStart(2, '0');
-      return yy + '.' + mo + '.' + dd + ' ' + hh + ':' + mm;
+       return dd + '.' + mo + '.' + yy + ' ' + hh + ':' + mm;
     },
 
     _fmtDur(secs) {      if (secs == null) return '';

@@ -75,6 +75,11 @@ class LastWordChecker(BaseAudioChunkChecker):
 
         disputed = not ends_with_boundary_word(orig_words[-1], trans)
         if disputed:
+            # Whisper sometimes inserts a spurious space inside a word
+            # (e.g. "под мрачным" for "подмрачным").  Retry on spaceless
+            # transcription as a last-resort tolerance.
+            disputed = not ends_with_boundary_word(orig_words[-1], trans.replace(" ", ""))
+        if disputed:
             logger.debug(
                 "last_word mismatch: orig=%r  trans=%r",
                 orig_words[-1],

@@ -366,7 +366,11 @@ class SaveEditRequest(BaseModel):
 
 @app.post("/api/save")
 async def save_edit(req: SaveEditRequest):
-    """Save edited sentence to text file and record in version history."""
+    """Save edited sentence to text file and record in version history.
+
+    If the old chunk had ``status='disputed'`` in the DB the new chunk inherits
+    that status so it stays visible in the Review UI after re-synthesis.
+    """
     new_text = normalize_chunk_eof_text(req.new_text)
     if not new_text.strip():
         raise HTTPException(400, "New text is empty")
@@ -388,15 +392,31 @@ async def save_edit(req: SaveEditRequest):
         raise HTTPException(400, str(exc))
     text_file.write_text(new_full_text, encoding="utf-8")
 
+    marked_disputed = False
     db_path = _audio_db_path(req.dir)
     try:
         store = AudioChunkStore(db_path)
         store.save_sentence_version(old_hash, req.old_text, replaced_by_hash=new_hash)
         store.save_sentence_version(new_hash, new_text)
-    except Exception as e:
-        print(f"[review_server] DB history error (non-fatal): {e}")
 
-    return {"status": "ok", "old_hash": old_hash, "new_hash": new_hash}
+        # Propagate disputed status: if the original chunk was disputed, the
+        # edited chunk should also start as disputed so it stays in the review
+        # queue until the new audio is checked.
+        old_row = store.get_chunk_cache_full_row(req.chapter_key, old_hash)
+        if old_row and old_row["status"] == "disputed":
+            store.save_disputed_chunk(
+                chapter_key=req.chapter_key,
+                sentence_hash=new_hash,
+                original_text=new_text,
+                transcription="",
+                similarity=0.0,
+            )
+            marked_disputed = True
+    except Exception as e:
+        print(f"[review_server] DB error (non-fatal): {e}")
+
+    return {"status": "ok", "old_hash": old_hash, "new_hash": new_hash,
+            "marked_disputed": marked_disputed}
 
 
 class DeleteRequest(BaseModel):
