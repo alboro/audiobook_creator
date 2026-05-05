@@ -22,7 +22,11 @@ NORMALIZER_REGISTRY: dict[str, tuple[str, str]] = {
     # tts_hard_consonants: де→дэ / те→тэ hard-consonant substitutions for TTS
     "tts_hard_consonants":                  ("audiobook_generator.normalizers.tts_hard_consonants_normalizer",                 "TTSHardConsonantsNormalizer"),
     "ru_initials":                          ("audiobook_generator.normalizers.ru_initials_normalizer",                         "InitialsRuNormalizer"),
+    # ru_time: colloquial time phrases (полночь, четверть второго, …) — run BEFORE ru_numbers
+    "ru_time":                              ("audiobook_generator.normalizers.ru_time_normalizer",                             "TimeRuNormalizer"),
     "ru_numbers":                           ("audiobook_generator.normalizers.ru_numbers_normalizer",                          "NumbersRuNormalizer"),
+    # ru_roman_numerals: standalone Roman numerals not caught by ru_numbers — run AFTER ru_numbers
+    "ru_roman_numerals":                    ("audiobook_generator.normalizers.ru_roman_numerals_normalizer",                   "RomanNumeralsRuNormalizer"),
     "ru_abbreviations":                     ("audiobook_generator.normalizers.ru_abbreviations_normalizer",                    "AbbreviationsRuNormalizer"),
     # ru_llm_stress_ambiguity: LLM-assisted homograph stress resolution
     "ru_llm_stress_ambiguity":              ("audiobook_generator.normalizers.ru_stress_ambiguity_normalizer",                 "StressAmbiguityLLMNormalizer"),
