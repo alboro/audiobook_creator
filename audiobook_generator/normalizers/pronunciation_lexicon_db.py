@@ -14,9 +14,10 @@ from typing import Iterable
 from audiobook_generator.normalizers.ru_text_utils import strip_combining_acute
 from audiobook_generator.normalizers.tsnorm_support import load_tsnorm_dictionary_data
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TSNORM_SOURCE = "tsnorm"
 ZALIZNIAK_SOURCE = "zalizniak"
+ESPEAK_HARD_CONSONANTS_SOURCE = "espeak_hard_consonants"
 PROPER_NAME_POS_TAGS = {"PNOUN", "CHARACTER"}
 
 
@@ -211,6 +212,55 @@ class PronunciationLexiconDB:
                 (source,),
             ).fetchone()[0]
 
+    def replace_tts_overrides(self, source: str, pairs: dict[str, str]) -> int:
+        with closing(self._connect()) as connection:
+            connection.execute("DELETE FROM tts_overrides WHERE source = ?", (source,))
+            batch = [(sf.lower(), tf.lower(), source) for sf, tf in pairs.items()]
+            connection.executemany(
+                "INSERT OR REPLACE INTO tts_overrides (surface_form, tts_form, source) VALUES (?, ?, ?)",
+                batch,
+            )
+            count = connection.execute(
+                "SELECT COUNT(*) FROM tts_overrides WHERE source = ?", (source,)
+            ).fetchone()[0]
+            connection.execute(
+                """
+                INSERT INTO metadata(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (f"source:{source}:tts_count", str(count)),
+            )
+            connection.commit()
+        return count
+
+    def get_tts_overrides(self, source: str | None = None) -> dict[str, str]:
+        query = "SELECT surface_form, tts_form FROM tts_overrides"
+        params: list[object] = []
+        if source:
+            query += " WHERE source = ?"
+            params.append(source)
+        with closing(self._connect()) as connection:
+            rows = connection.execute(query, params).fetchall()
+        return {row["surface_form"]: row["tts_form"] for row in rows}
+
+    def get_tts_form(self, surface_form: str, *, source: str | None = None) -> str | None:
+        normalized = strip_combining_acute(surface_form).lower()
+        query = "SELECT tts_form FROM tts_overrides WHERE surface_form = ?"
+        params: list[object] = [normalized]
+        if source:
+            query += " AND source = ?"
+            params.append(source)
+        query += " LIMIT 1"
+        with closing(self._connect()) as connection:
+            row = connection.execute(query, params).fetchone()
+        return row["tts_form"] if row else None
+
+    def count_tts_source_overrides(self, source: str) -> int:
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                "SELECT COUNT(*) FROM tts_overrides WHERE source = ?", (source,)
+            ).fetchone()[0]
+
     def _initialize(self):
         with closing(self._connect()) as connection:
             connection.executescript(
@@ -247,6 +297,16 @@ class PronunciationLexiconDB:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS tts_overrides (
+                    surface_form TEXT NOT NULL,
+                    tts_form TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    PRIMARY KEY (surface_form, source)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tts_overrides_surface_form
+                ON tts_overrides(surface_form);
                 """
             )
             connection.commit()
@@ -282,6 +342,7 @@ def ensure_pronunciation_lexicon_db(
     path: str | Path | None = None,
     *,
     include_zalizniak: bool = False,
+    include_espeak_hard_consonants: bool = False,
 ) -> PronunciationLexiconDB:
     """
     Open (or create) the pronunciation lexicon DB and ensure all requested
@@ -296,6 +357,11 @@ def ensure_pronunciation_lexicon_db(
         When True, also populate the ``zalizniak`` source (lemma-level stress
         from gramdict/zalizniak-2010).  Requires internet access on first run;
         data is then cached in ``.cache/zalizniak/``.
+    include_espeak_hard_consonants:
+        When True, populate/refresh the ``espeak_hard_consonants`` source
+        (hard-consonant TTS overrides from espeak-ng ru_listx).  Requires
+        internet access on first download; subsequent calls use the cached
+        file unless the content changes.
     """
     database = PronunciationLexiconDB(path or get_default_pronunciation_lexicon_db_path())
     built_sources = json.loads(database.get_metadata("built_sources") or "[]")
@@ -312,7 +378,53 @@ def ensure_pronunciation_lexicon_db(
         built_sources = sorted(set(built_sources + [ZALIZNIAK_SOURCE]))
         database.set_metadata("built_sources", json.dumps(built_sources, ensure_ascii=False))
 
+    if include_espeak_hard_consonants:
+        # Always call — the function is idempotent (skips rebuild when hash matches).
+        build_espeak_hard_consonants_tts_overrides(database)
+
     return database
+
+
+def build_espeak_hard_consonants_tts_overrides(
+    database: PronunciationLexiconDB,
+    *,
+    force_refresh: bool = False,
+    cache_dir: str | Path | None = None,
+) -> int:
+    """
+    Populate the DB with hard-consonant TTS overrides parsed from the
+    espeak-ng ``ru_listx`` file (MIT / Apache 2.0).
+
+    On first call the file is downloaded from GitHub and cached in
+    ``.cache/espeak_ru_listx.txt``.  Subsequent calls skip the rebuild
+    unless the cached file SHA-256 has changed or ``force_refresh=True``.
+
+    Returns the number of entries stored.
+    """
+    import logging
+    from audiobook_generator.normalizers.espeak_support import (
+        fetch_ru_listx,
+        parse_ru_listx,
+        sha256_file,
+    )
+
+    logger = logging.getLogger(__name__)
+    try:
+        cache_file = fetch_ru_listx(cache_dir=cache_dir, force_refresh=force_refresh)
+        file_hash = sha256_file(cache_file)
+    except Exception as exc:
+        logger.warning("Could not fetch espeak ru_listx: %s — skipping espeak hard-consonant overrides.", exc)
+        return database.count_tts_source_overrides(ESPEAK_HARD_CONSONANTS_SOURCE)
+
+    stored_hash = database.get_metadata(f"source:{ESPEAK_HARD_CONSONANTS_SOURCE}:file_hash")
+    if not force_refresh and stored_hash == file_hash:
+        return database.count_tts_source_overrides(ESPEAK_HARD_CONSONANTS_SOURCE)
+
+    pairs = parse_ru_listx(cache_file)
+    count = database.replace_tts_overrides(source=ESPEAK_HARD_CONSONANTS_SOURCE, pairs=pairs)
+    database.set_metadata(f"source:{ESPEAK_HARD_CONSONANTS_SOURCE}:file_hash", file_hash)
+    logger.info("Built espeak hard-consonant TTS overrides: %d entries.", count)
+    return count
 
 
 def build_zalizniak_pronunciation_lexicon(

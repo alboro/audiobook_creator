@@ -544,13 +544,6 @@ def handle_args():
         ),
     )
     normalizer_group.add_argument(
-        "--normalize_tts_pronunciation_overrides_words",
-        help=(
-            "Inline TTS pronunciation overrides as 'word=replacement,word2=replacement2'. "
-            "Overrides the built-in defaults entirely when set."
-        ),
-    )
-    normalizer_group.add_argument(
         "--normalize_stress_ambiguity_file",
         help=(
             "Optional UTF-8 file with per-line ambiguity variants in the form "

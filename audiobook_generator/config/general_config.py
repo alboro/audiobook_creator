@@ -147,9 +147,13 @@ class GeneralConfig:
             or _get('normalize_pronunciation_exceptions_file')
         )
         self.normalize_pronunciation_exceptions_file = self.normalize_tts_pronunciation_overrides_file
-        self.normalize_tts_pronunciation_overrides_words = _get(
-            'normalize_tts_pronunciation_overrides_words'
+        # tts_hard_consonants normalizer — new canonical keys (де→дэ / те→тэ etc.)
+        # Falls back to the old tts_pronunciation_overrides keys in the normalizer itself.
+        self.normalize_tts_hard_consonants_file = (
+            _get('normalize_tts_hard_consonants_file')
+            or self.normalize_tts_pronunciation_overrides_file
         )
+        self.normalize_tts_hard_consonants_words = _get('normalize_tts_hard_consonants_words')
         self.normalize_pronunciation_lexicon_db = _get('normalize_pronunciation_lexicon_db')
         # normalize_stress_exceptions_file: removed (replaced by normalize_stress_paradox_words)
         self.normalize_stress_ambiguity_file = _get('normalize_stress_ambiguity_file')

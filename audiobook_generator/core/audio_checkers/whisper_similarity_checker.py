@@ -44,7 +44,6 @@ def _build_pre_compare_normalizer(language: str = "ru"):
             normalize_log_changes=False,
             normalize_tts_safe_max_chars=180,
             normalize_tts_safe_comma_as_period=False,
-            normalize_tts_pronunciation_overrides_words=None,
             normalize_stress_paradox_words=None,
             normalize_tsnorm_min_word_length=2,
             normalize_tsnorm_stress_yo=False,

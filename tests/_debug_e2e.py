@@ -108,7 +108,6 @@ def build_args(**overrides):
         normalize_tts_safe_max_chars=180,
         normalize_pronunciation_exceptions_file=None,
         normalize_tts_pronunciation_overrides_file=None,
-        normalize_tts_pronunciation_overrides_words=None,
         normalize_pronunciation_lexicon_db=None,
         normalize_stress_ambiguity_file=None,
         normalize_tsnorm_stress_yo=True,

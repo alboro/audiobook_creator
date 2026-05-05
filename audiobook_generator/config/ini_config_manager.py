@@ -124,7 +124,6 @@ FIELD_SECTIONS: Dict[str, str] = {
     "normalize_tts_safe_max_chars": "normalize",
     "normalize_tts_safe_comma_as_period": "normalize",
     "normalize_tts_pronunciation_overrides_file": "normalize",
-    "normalize_tts_pronunciation_overrides_words": "normalize",
     "normalize_pronunciation_lexicon_db": "normalize",
     "normalize_stress_ambiguity_file": "normalize",
     "normalize_stress_ambiguity_system_prompt": "normalize",

@@ -19,7 +19,8 @@ NORMALIZER_REGISTRY: dict[str, tuple[str, str]] = {
     "simple_symbols":                       ("audiobook_generator.normalizers.simple_symbols_normalizer",                      "SimpleSymbolsNormalizer"),
     # tts_llm_safe_split: algorithmic split + optional LLM punctuation refinement
     "tts_llm_safe_split":                   ("audiobook_generator.normalizers.tts_safe_split_normalizer",                      "TTSSafeSplitNormalizer"),
-    "tts_pronunciation_overrides":          ("audiobook_generator.normalizers.tts_pronunciation_overrides_normalizer",         "TTSPronunciationOverridesNormalizer"),
+    # tts_hard_consonants: де→дэ / те→тэ hard-consonant substitutions for TTS
+    "tts_hard_consonants":                  ("audiobook_generator.normalizers.tts_hard_consonants_normalizer",                 "TTSHardConsonantsNormalizer"),
     "ru_initials":                          ("audiobook_generator.normalizers.ru_initials_normalizer",                         "InitialsRuNormalizer"),
     "ru_numbers":                           ("audiobook_generator.normalizers.ru_numbers_normalizer",                          "NumbersRuNormalizer"),
     "ru_abbreviations":                     ("audiobook_generator.normalizers.ru_abbreviations_normalizer",                    "AbbreviationsRuNormalizer"),
@@ -32,8 +33,9 @@ NORMALIZER_REGISTRY: dict[str, tuple[str, str]] = {
     "ru_tsnorm":                            ("audiobook_generator.normalizers.ru_tsnorm_normalizer",                           "TSNormRuNormalizer"),
     "remove_endnotes":                      ("audiobook_generator.normalizers.remove_endnotes_normalizer",                     "RemoveEndnotesNormalizer"),
     "remove_reference_numbers":             ("audiobook_generator.normalizers.remove_reference_numbers_normalizer",            "RemoveReferenceNumbersNormalizer"),
+    # cosy_voice: TTS-specific fixes for CosyVoice (capitalize + single-letter leading word)
+    "cosy_voice":                           ("audiobook_generator.normalizers.cosy_voice_normalizer",                          "CosyVoiceNormalizer"),
     # ── Deprecated aliases (kept for backward compatibility, will be removed in a future version) ──
-    "tts_llm_safe_split":                   ("audiobook_generator.normalizers.tts_safe_split_normalizer",                      "TTSSafeSplitNormalizer"),
     "tts_safe_split":                       ("audiobook_generator.normalizers.tts_safe_split_normalizer",                      "TTSSafeSplitAlgorithmicNormalizer"),
     "ru_proper_nouns":                      ("audiobook_generator.normalizers.ru_proper_nouns_normalizer",                     "ProperNounsRuNormalizer"),
     "ru_proper_nouns_pronunciation":        ("audiobook_generator.normalizers.ru_proper_nouns_pronunciation_normalizer",       "ProperNounsPronunciationRuNormalizer"),
@@ -215,6 +217,8 @@ _DEPRECATED_STEP_ALIASES = {
     "ru_stress_ambiguity": "ru_llm_stress_ambiguity",
     "ru_proper_nouns": "ru_proper_names",
     "ru_proper_nouns_pronunciation": "ru_llm_proper_nouns_pronunciation",
+    # tts_pronunciation_overrides is superseded by tts_hard_consonants
+    "tts_pronunciation_overrides": "tts_hard_consonants",
 }
 
 import logging as _logging
