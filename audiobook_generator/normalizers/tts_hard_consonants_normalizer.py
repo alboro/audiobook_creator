@@ -55,43 +55,88 @@ _CONS = r"[бвгджзйклмнпрстфхцчшщ]"
 # The replacement string is lowercased; case is restored by preserve_case().
 # ---------------------------------------------------------------------------
 _PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    # ── Special composite patterns (handle multi-substitution words) ───────
-    # "интернет" and all its forms: both те→тэ and не→нэ simultaneously.
+    # ── Special composite patterns (handle multi-substitution words) ────────
+    # "интернет" and all its forms: both те→тэ AND не→нэ simultaneously.
     (re.compile(_WB + r"интернет", re.IGNORECASE), "интэрнэт"),
-    # "менедж" prefix: covers менеджер, менеджмент, etc. — both ме→мэ and не→нэ.
+    # "менедж" prefix: covers менеджер, менеджмент, etc. — ме→мэ AND не→нэ.
     (re.compile(_WB + r"менедж", re.IGNORECASE), "мэнэдж"),
+    # "детектив": де→дэ AND те→тэ.
+    (re.compile(_WB + r"детектив", re.IGNORECASE), "дэтэктив"),
+    # "шедевр": ше→шэ AND де→дэ.
+    (re.compile(_WB + r"шедевр", re.IGNORECASE), "шэдэвр"),
+    # "тенде" before нц or р: тен→тэн AND де→дэ (тенденция, тендер).
+    (re.compile(_WB + r"тенде(?=нц|р)", re.IGNORECASE), "тэндэ"),
+    # "несессер": не→нэ AND both се→сэ.
+    (re.compile(_WB + r"несессер", re.IGNORECASE), "нэсэссэр"),
+    # "резюме": ре→рэ AND ме→мэ.  \b prevents matching резюмировать (soft).
+    (re.compile(_WB + r"резюме\b", re.IGNORECASE), "рэзюмэ"),
+    # "супермен": only мен→мэн (супер stays soft).  (?!едж) protects "суперменеджер".
+    (re.compile(_WB + r"супермен(?!едж)", re.IGNORECASE), "супермэн"),
+    # "ателье": те→тэ.
+    (re.compile(_WB + r"ателье", re.IGNORECASE), "атэлье"),
 
     # ── де → дэ ────────────────────────────────────────────────────────────
-    (re.compile(r"(?<=мо)де(?=м)", re.IGNORECASE), "дэ"),        # модем
-    (re.compile(_WB + r"моде(?=л)", re.IGNORECASE), "модэ"),     # модель, моделирование
-    (re.compile(r"(?<=н)де(?=кс)", re.IGNORECASE), "дэ"),        # индекс
-    (re.compile(_WB + r"шедевр", re.IGNORECASE), "шэдэвр"),       # шедевр (composite: ш+е→шэ AND д+е→дэ)
-    (re.compile(r"(?<=тен)де(?=нц)", re.IGNORECASE), "дэ"),      # тенденция
+    (re.compile(r"(?<=мо)де(?=м)", re.IGNORECASE), "дэ"),          # модем
+    (re.compile(_WB + r"моде(?=л)", re.IGNORECASE), "модэ"),       # модель, моделирование
+    (re.compile(r"(?<=н)де(?=кс)", re.IGNORECASE), "дэ"),          # индекс
+    (re.compile(r"(?<=стюар)де(?=сс)", re.IGNORECASE), "дэ"),      # стюардесса
+    (re.compile(_WB + r"демп", re.IGNORECASE), "дэмп"),            # демпинг, демпфер
+    (re.compile(_WB + r"дедук", re.IGNORECASE), "дэдук"),          # дедукция, дедуктивный
 
     # ── те → тэ ────────────────────────────────────────────────────────────
-    (re.compile(r"(?<=компью)те(?=р)", re.IGNORECASE), "тэ"),    # компьютер
-    (re.compile(r"(?<=прин)те(?=р)", re.IGNORECASE), "тэ"),      # принтер
-    (re.compile(_WB + r"конте(?=н)", re.IGNORECASE), "контэ"),   # контент
-    (re.compile(r"(?<=бак)те(?=р)", re.IGNORECASE), "тэ"),       # бактерия
-    (re.compile(r"(?<=аль)те(?=р)", re.IGNORECASE), "тэ"),       # альтернатива
+    (re.compile(r"(?<=компью)те(?=р)", re.IGNORECASE), "тэ"),      # компьютер
+    (re.compile(r"(?<=прин)те(?=р)", re.IGNORECASE), "тэ"),        # принтер
+    (re.compile(_WB + r"конте(?=н)", re.IGNORECASE), "контэ"),     # контент
+    (re.compile(r"(?<=бак)те(?=р)", re.IGNORECASE), "тэ"),         # бактерия
+    (re.compile(r"(?<=аль)те(?=р)", re.IGNORECASE), "тэ"),         # альтернатива
     # интер+[consonant]: интернет caught above; handles интерфейс etc.
     (re.compile(r"(?<=ин)те(?=р" + _CONS + r")", re.IGNORECASE), "тэ"),
-    (re.compile(_WB + r"анте(?=нн)", re.IGNORECASE), "антэ"),    # антенна
-    (re.compile(r"(?<=роу)те(?=р)", re.IGNORECASE), "тэ"),       # роутер
-    (re.compile(r"(?<=бар)те(?=р)", re.IGNORECASE), "тэ"),       # бартер
-    (re.compile(r"(?<=экс)те(?=нс)", re.IGNORECASE), "тэ"),      # экстенсивный
-    (re.compile(r"(?<=ин)те(?=нс)", re.IGNORECASE), "тэ"),       # интенсивный
-    (re.compile(r"(?<=про)те(?=кт|з)", re.IGNORECASE), "тэ"),    # протект, протез
-    (re.compile(r"(?<=эс)те(?=т)", re.IGNORECASE), "тэ"),        # эстет
-    (re.compile(r"(?<=син)те(?=з|т)", re.IGNORECASE), "тэ"),     # синтез, синтетика
+    (re.compile(_WB + r"анте(?=нн)", re.IGNORECASE), "антэ"),      # антенна
+    (re.compile(r"(?<=роу)те(?=р)", re.IGNORECASE), "тэ"),         # роутер
+    (re.compile(r"(?<=бар)те(?=р)", re.IGNORECASE), "тэ"),         # бартер
+    (re.compile(r"(?<=экс)те(?=нс)", re.IGNORECASE), "тэ"),        # экстенсивный
+    (re.compile(r"(?<=ин)те(?=нс)", re.IGNORECASE), "тэ"),         # интенсивный
+    (re.compile(r"(?<=про)те(?=кт|з)", re.IGNORECASE), "тэ"),      # протект, протез
+    (re.compile(r"(?<=эс)те(?=т)", re.IGNORECASE), "тэ"),          # эстет
+    (re.compile(r"(?<=син)те(?=з|т)", re.IGNORECASE), "тэ"),       # синтез, синтетика
+    (re.compile(_WB + r"тенн", re.IGNORECASE), "тэнн"),            # теннис, теннисный
+    (re.compile(_WB + r"тент", re.IGNORECASE), "тэнт"),            # тент, тентовый
+    (re.compile(_WB + r"тест", re.IGNORECASE), "тэст"),            # тест, тестирование
+    (re.compile(_WB + r"тезис", re.IGNORECASE), "тэзис"),          # тезис, тезисный
+    (re.compile(_WB + r"тембр", re.IGNORECASE), "тэмбр"),          # тембр, тембровый
+    (re.compile(_WB + r"термос", re.IGNORECASE), "тэрмос"),        # термос (NOT термин)
+    (re.compile(r"терьер", re.IGNORECASE), "тэрьер"),              # терьер, бультерьер
+    (re.compile(r"(?<=ар)те(?=р)", re.IGNORECASE), "тэ"),          # артерия
+    (re.compile(r"(?<=кри)те(?=р)", re.IGNORECASE), "тэ"),         # критерий
+    (re.compile(r"(?<=пар)те(?=р)", re.IGNORECASE), "тэ"),         # партер
+    (re.compile(r"(?<=пан)те(?=р)", re.IGNORECASE), "тэ"),         # пантера
+    (re.compile(r"(?<=по)те(?=нц)", re.IGNORECASE), "тэ"),         # потенциал, потенция
+    (re.compile(r"(?<=бижу)те(?=р)", re.IGNORECASE), "тэ"),        # бижутерия
+    (re.compile(r"(?<=бифш)те(?=кс)", re.IGNORECASE), "тэ"),       # бифштекс
+    (re.compile(r"(?<=кок)те(?=йль)", re.IGNORECASE), "тэ"),       # коктейль
+    (re.compile(r"(?<=сви)те(?=р)", re.IGNORECASE), "тэ"),         # свитер
 
     # ── не → нэ ────────────────────────────────────────────────────────────
-    (re.compile(r"(?<=биз)не(?=с)", re.IGNORECASE), "нэ"),       # бизнес
-    (re.compile(_WB + r"кларне(?=т)", re.IGNORECASE), "кларнэ"), # кларнет
-    (re.compile(r"(?<=э)не(?=рг)", re.IGNORECASE), "нэ"),        # энергия
+    (re.compile(r"(?<=биз)не(?=с)", re.IGNORECASE), "нэ"),         # бизнес
+    (re.compile(_WB + r"кларне(?=т)", re.IGNORECASE), "кларнэ"),   # кларнет
+    (re.compile(r"(?<=э)не(?=рг)", re.IGNORECASE), "нэ"),          # энергия
+    (re.compile(r"(?<=майо)не(?=з)", re.IGNORECASE), "нэ"),        # майонез
+    (re.compile(r"(?<=па)не(?=л)", re.IGNORECASE), "нэ"),          # панель
+    (re.compile(r"(?<=тон)не(?=л)", re.IGNORECASE), "нэ"),         # тоннель
+    (re.compile(r"(?<=тун)не(?=л)", re.IGNORECASE), "нэ"),         # туннель (2 н)
+    (re.compile(r"(?<=ту)не(?=л)", re.IGNORECASE), "нэ"),          # тунель (1 н)
+    (re.compile(_WB + r"портмоне\b", re.IGNORECASE), "портмонэ"),  # портмоне
+    (re.compile(_WB + r"турне\b", re.IGNORECASE), "турнэ"),        # турне (не турнепс)
+
+    # ── се → сэ ────────────────────────────────────────────────────────────
+    (re.compile(r"(?<=диспан)се(?=р)", re.IGNORECASE), "сэ"),      # диспансер
+    (re.compile(_WB + r"сервис", re.IGNORECASE), "сэрвис"),        # сервис (NOT сервер)
+
+    # ── ре → рэ ────────────────────────────────────────────────────────────
+    (re.compile(_WB + r"регби", re.IGNORECASE), "рэгби"),          # регби
 
     # ── ле → лэ ────────────────────────────────────────────────────────────
-    (re.compile(r"(?<=п)ле(?=ер)", re.IGNORECASE), "лэ"),        # плеер
+    (re.compile(r"(?<=п)ле(?=ер)", re.IGNORECASE), "лэ"),          # плеер
 ]
 
 # ---------------------------------------------------------------------------
@@ -109,6 +154,11 @@ BUILTIN_TTS_HARD_CONSONANTS_OVERRIDES: dict[str, str] = {
     "отелям":   "отэлям",
     "отелями":  "отэлями",
     "отелях":   "отэлях",
+    # Неизменяемые слова (не склоняются; паттернами не покрыть точечно)
+    "эссе":     "эссэ",    # se→сэ
+    "шоссе":    "шоссэ",   # se→сэ
+    "пюре":     "пюрэ",    # ре→рэ
+    "тире":     "тирэ",    # ре→рэ
 }
 
 
