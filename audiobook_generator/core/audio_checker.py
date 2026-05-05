@@ -225,19 +225,57 @@ class AudioChecker:
 
         if added_dirs:
             logger.info("Prepared CUDA DLL paths for audio_check: %s", "; ".join(added_dirs))
+        else:
+            logger.warning(
+                "audio_check: device=cuda on Windows but no CUDA DLL directories were found "
+                "in the venv. If Whisper fails to load, set device=cpu or ensure "
+                "cublas64_12.dll / cudart64_12.dll / cudnn64_9.dll are on PATH."
+            )
         self._cuda_runtime_prepared = True
 
     def _get_model(self):
-        if self._model is None:
-            self._prepare_windows_cuda_runtime()
-            from faster_whisper import WhisperModel  # type: ignore[import]
-            logger.info("Loading Whisper model '%s' on %s …", self._model_size, self._device)
+        if self._model is not None:
+            return self._model
+
+        self._prepare_windows_cuda_runtime()
+        from faster_whisper import WhisperModel  # type: ignore[import]
+
+        # ctranslate2 requires device-appropriate compute types.
+        # "int8" is CPU-optimal; on CUDA the correct types are float16 / int8_float16.
+        # Pass "auto" to let ctranslate2 pick the best type for the device, unless the
+        # caller explicitly overrode compute_type to something other than the default.
+        compute_type = self._compute_type
+        if compute_type == "int8" and str(self._device).lower() == "cuda":
+            compute_type = "auto"
+            logger.info(
+                "audio_check: compute_type upgraded from 'int8' to 'auto' for device=cuda "
+                "(int8 is CPU-only; ctranslate2 will choose float16 or int8_float16)."
+            )
+
+        logger.info(
+            "Loading Whisper model '%s' on %s (compute_type=%s) …",
+            self._model_size, self._device, compute_type,
+        )
+        try:
             self._model = WhisperModel(
                 self._model_size,
                 device=self._device,
-                compute_type=self._compute_type,
+                compute_type=compute_type,
             )
-            logger.info("Whisper model ready.")
+        except Exception as exc:
+            logger.error(
+                "audio_check: failed to load Whisper on %s (%s). "
+                "Falling back to CPU. Original error: %s",
+                self._device, compute_type, exc,
+            )
+            self._device = "cpu"
+            self._model = WhisperModel(
+                self._model_size,
+                device="cpu",
+                compute_type="int8",
+            )
+
+        logger.info("Whisper model ready (device=%s).", self._device)
         return self._model
 
     def _transcribe(self, wav_path: Path) -> str:
