@@ -209,8 +209,12 @@ class GeneralConfig:
         self.audio_check_force = _get('audio_check_force')
         # Comma-separated list of checker names to run (see AUDIO_CHECKER_REGISTRY).
         # Default: whisper_similarity,first_word,last_word
-        # Full set:  whisper_similarity,first_word,last_word,reference
+        # Full set:  whisper_similarity,first_word,last_word,reference,transcription_artifacts
         self.audio_check_checkers = _get('audio_check_checkers')
+        # TranscriptionArtifactsChecker: comma-separated substrings to find in
+        # Whisper transcription.  Chunk is marked disputed if any substring is
+        # found (case-insensitive).  Example: "точка,очка"
+        self.audio_checker_transcription_artifacts = _get('audio_checker_transcription_artifacts')
         # Auto-loop thresholds (used by --mode audio_auto).
         self.audio_auto_check_threshold = _get('audio_auto_check_threshold', float)
         self.audio_auto_retry = _get('audio_auto_retry', int)

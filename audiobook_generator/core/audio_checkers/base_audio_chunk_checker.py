@@ -401,6 +401,10 @@ AUDIO_CHECKER_REGISTRY: dict[str, tuple[str, str]] = {
         "audiobook_generator.core.audio_checkers.reference_checker",
         "ReferenceChecker",
     ),
+    "transcription_artifacts": (
+        "audiobook_generator.core.audio_checkers.transcription_artifacts_checker",
+        "TranscriptionArtifactsChecker",
+    ),
 }
 
 #: Default checker pipeline when ``audio_check_checkers`` is not set in config.
