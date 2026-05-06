@@ -90,27 +90,26 @@ def package_m4b(
         with open(metadata_path, "w", encoding="utf-8") as metadata_file:
             metadata_file.write("\n".join(metadata_lines) + "\n")
 
+        # Build the command: ALL inputs first, then ALL output options.
+        # ffmpeg parses options between two -i flags as *input* options for the
+        # next input file — placing output-only options (-map, -c:a, …) there
+        # causes "Option map cannot be applied to input url" errors.
         command = [
             ffmpeg_path,
             "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            concat_path,
-            "-i",
-            metadata_path,
-            "-map",
-            "0:a",
-            "-map_metadata",
-            "1",
-            "-c:a",
-            "aac",
-            "-b:a",
-            bitrate,
-            "-movflags",
-            "+faststart",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_path,   # input 0 — audio
+            "-i", metadata_path, # input 1 — chapter metadata
+        ]
+
+        # Output options start here (after all inputs).
+        output_opts = [
+            "-map", "0:a",
+            "-map_metadata", "1",
+            "-c:a", "aac",
+            "-b:a", bitrate,
+            "-movflags", "+faststart",
         ]
 
         if cover:
@@ -118,19 +117,14 @@ def package_m4b(
             cover_path = os.path.join(temp_dir, f"cover{_cover_suffix(media_type)}")
             with open(cover_path, "wb") as cover_file:
                 cover_file.write(cover_bytes)
-            command.extend(
-                [
-                    "-i",
-                    cover_path,
-                    "-map",
-                    "2:v",
-                    "-c:v",
-                    "copy",
-                    "-disposition:v:0",
-                    "attached_pic",
-                ]
-            )
+            command.extend(["-i", cover_path])  # input 2 — cover image
+            output_opts.extend([
+                "-map", "2:v",
+                "-c:v", "copy",
+                "-disposition:v:0", "attached_pic",
+            ])
 
+        command.extend(output_opts)
         command.append(output_path)
 
         logger.info("Packaging audiobook to m4b: %s", output_path)
