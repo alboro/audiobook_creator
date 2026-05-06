@@ -624,6 +624,22 @@ class AudiobookGenerator:
                 first_ext = _Path(chunk_paths[0]).suffix  # e.g. ".wav"
                 chapter_out = str(audio_root / f"{chapter_key}{first_ext}")
 
+                # Skip rebuild if the chapter file is already up-to-date:
+                # exists AND is newer than every chunk (mtime-based).
+                chapter_out_path = _Path(chapter_out)
+                if chapter_out_path.exists():
+                    chapter_mtime = chapter_out_path.stat().st_mtime
+                    newest_chunk_mtime = max(
+                        _Path(p).stat().st_mtime for p in chunk_paths
+                    )
+                    if chapter_mtime >= newest_chunk_mtime:
+                        logger.info(
+                            "  Chapter %d '%s': chapter file up-to-date, skipping rebuild.",
+                            idx, title,
+                        )
+                        result.append((chapter_out, title))
+                        continue
+
                 # Delete stale chapter files for this chapter key
                 for ext in _AUDIO_EXTS:
                     old = audio_root / f"{chapter_key}{ext}"

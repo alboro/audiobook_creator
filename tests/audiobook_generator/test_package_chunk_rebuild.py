@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import io
+import os
 import struct
 import tempfile
+import time
 import wave
 from pathlib import Path
 from types import SimpleNamespace
@@ -646,11 +648,18 @@ def test_smart_chapter_list_deletes_old_chapter_file():
 
         wav_dir = root / "wav"
         chunks_dir = wav_dir / "chunks"
-        _write_chunk(chunks_dir, "0001_Chapter_One", sentence)
 
-        # Pre-existing stale chapter file
+        # Pre-existing stale chapter file — written BEFORE the chunk so that
+        # os.utime can push it into the past unambiguously.
         stale = wav_dir / "0001_Chapter_One.wav"
+        stale.parent.mkdir(parents=True, exist_ok=True)
         stale.write_bytes(b"stale")
+        # Force the stale file to appear 60 s in the past so the chunk is newer.
+        past = time.time() - 60
+        os.utime(str(stale), (past, past))
+
+        # Chunk is created after → current mtime → newer than stale file.
+        _write_chunk(chunks_dir, "0001_Chapter_One", sentence)
 
         gen = _make_generator(str(root))
 
@@ -780,3 +789,241 @@ def test_run_package_only_applies_title_and_cover_overrides():
         assert len(packaged) == 1
         assert packaged[0]["chapter_titles"] == ["Custom Chapter Title"]
         assert packaged[0]["cover"] == (b"fake-jpeg-data", "image/jpeg")
+
+
+# ===========================================================================
+# Tests for the chapter-file freshness check (skip rebuild if up-to-date)
+# ===========================================================================
+
+def _setup_chapter(
+    root: Path,
+    chapter_key: str,
+    sentence: str,
+    chapter_mtime_offset: float,
+    chunk_mtime_offset: float,
+    create_chapter_file: bool = True,
+) -> tuple[Path, Path]:
+    """
+    Create a chapter .txt file, one chunk, and (optionally) a chapter audio file
+    with explicit mtimes.
+
+    mtime_offset is seconds relative to *now*:  negative = in the past.
+
+    Returns (wav_dir, chunk_path).
+    """
+    run_dir = root / "text" / "001"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / f"{chapter_key}.txt").write_text(sentence, encoding="utf-8")
+
+    wav_dir = root / "wav"
+    chunks_dir = wav_dir / "chunks"
+    chunk_path = _write_chunk(chunks_dir, chapter_key, sentence)
+
+    now = time.time()
+    os.utime(str(chunk_path), (now + chunk_mtime_offset, now + chunk_mtime_offset))
+
+    if create_chapter_file:
+        chapter_file = wav_dir / f"{chapter_key}.wav"
+        chapter_file.write_bytes(b"existing")
+        os.utime(str(chapter_file), (now + chapter_mtime_offset, now + chapter_mtime_offset))
+
+    return wav_dir, chunk_path
+
+
+class TestSmartChapterListFreshness:
+    """
+    Verify the mtime-based skip-rebuild logic added to _smart_chapter_list.
+
+    The rule:
+      - chapter file exists AND chapter_mtime >= newest_chunk_mtime → skip rebuild
+      - chapter file missing OR chapter_mtime < newest_chunk_mtime   → rebuild
+    """
+
+    def test_up_to_date_chapter_skips_rebuild(self, tmp_path):
+        """Chapter file newer than all chunks → merge is NOT called, existing file reused."""
+        sentence = "Hello world."
+        chapter_key = "0001_Chapter_One"
+        wav_dir, _ = _setup_chapter(
+            tmp_path, chapter_key, sentence,
+            chapter_mtime_offset=0,   # chapter: now
+            chunk_mtime_offset=-60,   # chunk:   60 s ago
+        )
+        gen = _make_generator(str(tmp_path))
+        merge_called = []
+
+        def fail_if_called(*args, **kwargs):
+            merge_called.append(True)
+            raise AssertionError("_merge_audio_files should NOT be called for up-to-date chapter")
+
+        with patch(
+            "audiobook_generator.core.chunked_audio_generator._merge_audio_files",
+            side_effect=fail_if_called,
+        ):
+            result = gen._smart_chapter_list(str(wav_dir))
+
+        assert not merge_called, "Merge was called unexpectedly"
+        assert result is not None and len(result) == 1
+        # Result must point at the existing chapter file (not a new path)
+        chapter_file = wav_dir / f"{chapter_key}.wav"
+        assert Path(result[0][0]) == chapter_file
+        assert chapter_file.read_bytes() == b"existing", "Existing file must not be touched"
+
+    def test_up_to_date_chapter_same_mtime_skips_rebuild(self, tmp_path):
+        """chapter_mtime == chunk_mtime satisfies >= condition → skip rebuild."""
+        sentence = "Same time sentence."
+        chapter_key = "0001_Chapter_One"
+        fixed_time = time.time() - 30  # some point in the past
+
+        run_dir = tmp_path / "text" / "001"
+        run_dir.mkdir(parents=True)
+        (run_dir / f"{chapter_key}.txt").write_text(sentence, encoding="utf-8")
+
+        wav_dir = tmp_path / "wav"
+        chunks_dir = wav_dir / "chunks"
+        chunk_path = _write_chunk(chunks_dir, chapter_key, sentence)
+
+        chapter_file = wav_dir / f"{chapter_key}.wav"
+        chapter_file.write_bytes(b"existing")
+
+        # Set both to exactly the same mtime
+        os.utime(str(chunk_path), (fixed_time, fixed_time))
+        os.utime(str(chapter_file), (fixed_time, fixed_time))
+
+        gen = _make_generator(str(tmp_path))
+        merge_called = []
+
+        with patch(
+            "audiobook_generator.core.chunked_audio_generator._merge_audio_files",
+            side_effect=lambda *a, **kw: merge_called.append(True),
+        ):
+            result = gen._smart_chapter_list(str(wav_dir))
+
+        assert not merge_called, "Equal mtime should skip rebuild (>= condition)"
+        assert result is not None and len(result) == 1
+
+    def test_stale_chapter_triggers_rebuild(self, tmp_path):
+        """Chapter file older than a chunk → merge IS called, stale file replaced."""
+        sentence = "Stale chapter sentence."
+        chapter_key = "0001_Chapter_One"
+        wav_dir, _ = _setup_chapter(
+            tmp_path, chapter_key, sentence,
+            chapter_mtime_offset=-120,  # chapter: 2 min ago (stale)
+            chunk_mtime_offset=0,       # chunk:   now (newer)
+        )
+        gen = _make_generator(str(tmp_path))
+        merge_called = []
+
+        def fake_merge(chunk_paths, output_path, *args, **kwargs):
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_path).write_bytes(b"rebuilt")
+            merge_called.append(output_path)
+
+        with patch(
+            "audiobook_generator.core.chunked_audio_generator._merge_audio_files",
+            side_effect=fake_merge,
+        ):
+            result = gen._smart_chapter_list(str(wav_dir))
+
+        assert merge_called, "Merge should have been called for stale chapter"
+        assert result is not None and len(result) == 1
+        assert Path(result[0][0]).read_bytes() == b"rebuilt"
+
+    def test_missing_chapter_file_triggers_rebuild(self, tmp_path):
+        """No chapter file at all → merge is called to create it from scratch."""
+        sentence = "No chapter file here."
+        chapter_key = "0001_Chapter_One"
+        wav_dir, _ = _setup_chapter(
+            tmp_path, chapter_key, sentence,
+            chapter_mtime_offset=0,
+            chunk_mtime_offset=-60,
+            create_chapter_file=False,  # <-- key: no existing chapter file
+        )
+        gen = _make_generator(str(tmp_path))
+        merge_called = []
+
+        def fake_merge(chunk_paths, output_path, *args, **kwargs):
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_path).write_bytes(b"new")
+            merge_called.append(output_path)
+
+        with patch(
+            "audiobook_generator.core.chunked_audio_generator._merge_audio_files",
+            side_effect=fake_merge,
+        ):
+            result = gen._smart_chapter_list(str(wav_dir))
+
+        assert merge_called, "Merge should be called when chapter file is absent"
+        assert result is not None and len(result) == 1
+
+    def test_mixed_freshness_two_chapters(self, tmp_path):
+        """Two chapters: one up-to-date (skip), one stale (rebuild)."""
+        s1 = "Up to date sentence."
+        s2 = "Stale sentence here."
+        now = time.time()
+
+        run_dir = tmp_path / "text" / "001"
+        run_dir.mkdir(parents=True)
+        (run_dir / "0001_Chapter_One.txt").write_text(s1, encoding="utf-8")
+        (run_dir / "0002_Chapter_Two.txt").write_text(s2, encoding="utf-8")
+
+        wav_dir = tmp_path / "wav"
+        chunks_dir = wav_dir / "chunks"
+
+        # Chapter 1: up-to-date — chapter file newer than chunk
+        chunk1 = _write_chunk(chunks_dir, "0001_Chapter_One", s1)
+        ch1_file = wav_dir / "0001_Chapter_One.wav"
+        ch1_file.write_bytes(b"existing1")
+        os.utime(str(chunk1),   (now - 120, now - 120))  # chunk 2 min old
+        os.utime(str(ch1_file), (now,       now))        # chapter: now (newer)
+
+        # Chapter 2: stale — chunk newer than chapter file
+        chunk2 = _write_chunk(chunks_dir, "0002_Chapter_Two", s2)
+        ch2_file = wav_dir / "0002_Chapter_Two.wav"
+        ch2_file.write_bytes(b"stale2")
+        os.utime(str(chunk2),   (now,       now))        # chunk: now
+        os.utime(str(ch2_file), (now - 120, now - 120))  # chapter 2 min old (stale)
+
+        gen = _make_generator(str(tmp_path))
+        rebuilt: list[str] = []
+
+        def fake_merge(chunk_paths, output_path, *args, **kwargs):
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_path).write_bytes(b"rebuilt")
+            rebuilt.append(output_path)
+
+        with patch(
+            "audiobook_generator.core.chunked_audio_generator._merge_audio_files",
+            side_effect=fake_merge,
+        ):
+            result = gen._smart_chapter_list(str(wav_dir))
+
+        assert result is not None and len(result) == 2
+        # Only one merge call (chapter 2)
+        assert len(rebuilt) == 1, f"Expected 1 rebuild, got {len(rebuilt)}: {rebuilt}"
+
+        ch1_result = next(p for p, t in result if "One" in t)
+        ch2_result = next(p for p, t in result if "Two" in t)
+
+        assert Path(ch1_result).read_bytes() == b"existing1", "Chapter 1 must not be touched"
+        assert Path(ch2_result).read_bytes() == b"rebuilt",   "Chapter 2 must be rebuilt"
+
+    def test_up_to_date_log_message(self, tmp_path, caplog):
+        """Up-to-date chapter emits 'up-to-date, skipping rebuild' log line."""
+        import logging
+        sentence = "Log test sentence."
+        chapter_key = "0001_Chapter_One"
+        wav_dir, _ = _setup_chapter(
+            tmp_path, chapter_key, sentence,
+            chapter_mtime_offset=0,
+            chunk_mtime_offset=-60,
+        )
+        gen = _make_generator(str(tmp_path))
+
+        with patch(
+            "audiobook_generator.core.chunked_audio_generator._merge_audio_files",
+        ), caplog.at_level(logging.INFO):
+            gen._smart_chapter_list(str(wav_dir))
+
+        assert any("up-to-date" in r.message for r in caplog.records), (
+            "Expected 'up-to-date' log message when rebuild is skipped"
+        )
