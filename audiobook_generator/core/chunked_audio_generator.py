@@ -629,6 +629,11 @@ _LF_PREAMBLE_ARTIFACT_ZONE_MS = 60    # initial "artifact zone" to characterise
 _LF_PREAMBLE_WINDOW_MS = 20           # analysis window per step
 _LF_PREAMBLE_HOP_MS = 10             # hop between windows
 _LF_PREAMBLE_LPF_MS = 2.0            # moving-average window → ~500 Hz LPF proxy
+# Hard cap on how many ms the function may trim.  The genuine CosyVoice LF
+# pre-phonation burst never exceeds ~50 ms; anything longer is almost certainly
+# real speech (e.g. a word starting with a nasal like "М" that has low ZCR and
+# high low-frequency energy throughout its duration).
+_LF_PREAMBLE_MAX_TRIM_MS = 80
 
 
 def _lf_preamble_trim_frames(
@@ -725,6 +730,7 @@ def _lf_preamble_trim_frames(
 
     # ── Walk forward to find where speech begins ────────────────────────────
     speech_onset_frame = 0
+    max_trim_frames = int(framerate * _LF_PREAMBLE_MAX_TRIM_MS / 1000)
     search_start = max(hop_fr, artifact_zone - win_fr)
     for start in range(search_start, max_check, hop_fr):
         zcr, _lfr, _rms = _analyze(start)
@@ -734,6 +740,19 @@ def _lf_preamble_trim_frames(
 
     if speech_onset_frame <= 0:
         return 0  # no speech found after artifact — don't trim
+
+    if speech_onset_frame > max_trim_frames:
+        # Speech onset is too far in — almost certainly real speech (e.g. a word
+        # starting with a low-ZCR nasal consonant).  Genuine CosyVoice preamble
+        # bursts always resolve within _LF_PREAMBLE_MAX_TRIM_MS ms.
+        logger.debug(
+            "LF preamble: speech onset at %.0f ms exceeds max trim %.0f ms — skipping trim "
+            "(avg_ZCR=%.3f max_LFR=%.3f avg_RMS=%.3f)",
+            speech_onset_frame * 1000.0 / framerate,
+            _LF_PREAMBLE_MAX_TRIM_MS,
+            avg_zcr, artifact_max_lfr, avg_rms,
+        )
+        return 0
 
     logger.debug(
         "LF preamble detected: trim=%.0f ms "
