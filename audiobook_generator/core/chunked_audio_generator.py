@@ -378,6 +378,100 @@ def _remove_dc_offset(data: bytes, sampwidth: int, nchannels: int) -> bytes:
         return data
 
 
+def _write_merged_wav_numpy(
+    chunks: "List[bytes]",
+    output_path: str,
+    nchannels: int,
+    sampwidth: int,
+    framerate: int,
+    crossfade_samples: int,
+    gap_bytes: bytes,
+) -> None:
+    """Merge *chunks* into *output_path* using a streaming O(N) approach.
+
+    Only the crossfade tail of the previous chunk (≤30 ms) is kept in memory
+    between iterations; the body is written to disk immediately.  This avoids
+    the O(N²) buffer-copy loop of the original iterative ``_crossfade_pcm``
+    approach, which caused multi-hour runtimes for chapters with 1000+ chunks.
+
+    Requires NumPy; raises ``ImportError`` if not available (caller falls back
+    to the legacy path).
+    """
+    import wave
+    import numpy as np
+
+    dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
+    dt = dtype_map.get(sampwidth)
+    if dt is None:
+        raise TypeError(f"Unsupported sampwidth: {sampwidth}")
+    info = np.iinfo(dt)
+    cf = crossfade_samples
+
+    # Pre-compute cosine ramps once; reused at every boundary.
+    ramp_down: "np.ndarray | None" = None
+    ramp_up:   "np.ndarray | None" = None
+    if cf > 0:
+        t = np.linspace(0.0, 1.0, cf, dtype=np.float64)
+        ramp_down = (0.5 * (1.0 + np.cos(np.pi * t)))[:, np.newaxis]  # 1→0
+        ramp_up   = (0.5 * (1.0 - np.cos(np.pi * t)))[:, np.newaxis]  # 0→1
+
+    def _to_arr(data: bytes) -> "np.ndarray":
+        return np.frombuffer(data, dtype=dt).reshape(-1, nchannels).astype(np.float64)
+
+    def _write(w: "wave.Wave_write", arr: "np.ndarray") -> None:
+        if len(arr):
+            w.writeframes(np.clip(arr, info.min, info.max).astype(dt).tobytes())
+
+    # Interleave silent gap chunks when gap_ms > 0.
+    all_chunks: List[bytes] = list(chunks)
+    if gap_bytes and len(all_chunks) > 1:
+        with_gaps: List[bytes] = []
+        for i, c in enumerate(all_chunks):
+            with_gaps.append(c)
+            if i < len(all_chunks) - 1:
+                with_gaps.append(gap_bytes)
+        all_chunks = with_gaps
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(output_path, "wb") as w:
+        w.setnchannels(nchannels)
+        w.setsampwidth(sampwidth)
+        w.setframerate(framerate)
+
+        # ``tail`` = float64 array of the last ``cf`` frames from the previous
+        # chunk, held in memory for blending with the next chunk's head.
+        tail: "np.ndarray | None" = None
+
+        for i, data in enumerate(all_chunks):
+            arr = _to_arr(data)
+            is_last = (i == len(all_chunks) - 1)
+
+            # ── Blend previous tail with our head ────────────────────────────
+            if tail is not None:
+                if cf > 0 and len(tail) > 0 and len(arr) > 0:
+                    actual_cf = min(cf, len(tail), len(arr))
+                    region = (
+                        tail[:actual_cf] * ramp_down[:actual_cf]
+                        + arr[:actual_cf] * ramp_up[:actual_cf]
+                    )
+                    _write(w, region)
+                    arr = arr[actual_cf:]   # consume blended head
+                else:
+                    _write(w, tail)
+                tail = None
+
+            # ── Write body; save tail for next boundary ───────────────────────
+            if not is_last and cf > 0 and len(arr) > cf:
+                _write(w, arr[:-cf])       # body (all except last cf frames)
+                tail = arr[-cf:].copy()    # tail saved for next iteration
+            else:
+                _write(w, arr)             # last chunk — write everything
+
+        # Flush any leftover tail (shouldn't happen, but be safe).
+        if tail is not None:
+            _write(w, tail)
+
+
 def _crossfade_pcm(
     data_a: bytes,
     data_b: bytes,
@@ -810,26 +904,41 @@ def _merge_wav_files(
     # ── Merge with crossfade ──────────────────────────────────────────────────
     crossfade_samples = int(out_framerate * smooth_join_ms / 1000) if smooth_join_ms > 0 else 0
 
-    combined = chunks[0]
-    for next_data in chunks[1:]:
-        if gap_bytes:
-            # Append silence, then crossfade silence-end → next chunk start
-            combined = _crossfade_pcm(
-                combined + gap_bytes, next_data,
-                out_sampwidth, out_nchannels, crossfade_samples,
-            )
-        else:
-            combined = _crossfade_pcm(
-                combined, next_data,
-                out_sampwidth, out_nchannels, crossfade_samples,
-            )
+    # Fast O(N) streaming path (requires numpy).  Streams the body of every
+    # chunk directly to disk, holding only a crossfade-length tail (≤30 ms)
+    # in memory between iterations.  Falls back to the legacy O(N²) in-memory
+    # loop when numpy is absent or sampwidth is exotic.
+    try:
+        _write_merged_wav_numpy(
+            chunks,
+            output_path,
+            nchannels=out_nchannels,
+            sampwidth=out_sampwidth,
+            framerate=out_framerate,
+            crossfade_samples=crossfade_samples,
+            gap_bytes=gap_bytes,
+        )
+    except (ImportError, TypeError):
+        # ── Legacy O(N²) fallback ─────────────────────────────────────────────
+        combined = chunks[0]
+        for next_data in chunks[1:]:
+            if gap_bytes:
+                # Append silence, then crossfade silence-end → next chunk start
+                combined = _crossfade_pcm(
+                    combined + gap_bytes, next_data,
+                    out_sampwidth, out_nchannels, crossfade_samples,
+                )
+            else:
+                combined = _crossfade_pcm(
+                    combined, next_data,
+                    out_sampwidth, out_nchannels, crossfade_samples,
+                )
 
-    # ── Write output ──────────────────────────────────────────────────────────
-    with wave.open(output_path, 'wb') as out_w:
-        out_w.setnchannels(out_nchannels)
-        out_w.setsampwidth(out_sampwidth)
-        out_w.setframerate(out_framerate)
-        out_w.writeframes(combined)
+        with wave.open(output_path, 'wb') as out_w:
+            out_w.setnchannels(out_nchannels)
+            out_w.setsampwidth(out_sampwidth)
+            out_w.setframerate(out_framerate)
+            out_w.writeframes(combined)
 
     logger.debug(
         "Merged %d WAV chunks into %s "
