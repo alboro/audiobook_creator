@@ -28,6 +28,8 @@ NORMALIZER_REGISTRY: dict[str, tuple[str, str]] = {
     # ru_roman_numerals: standalone Roman numerals not caught by ru_numbers — run AFTER ru_numbers
     "ru_roman_numerals":                    ("audiobook_generator.normalizers.ru_roman_numerals_normalizer",                   "RomanNumeralsRuNormalizer"),
     "ru_abbreviations":                     ("audiobook_generator.normalizers.ru_abbreviations_normalizer",                    "AbbreviationsRuNormalizer"),
+    # ru_silero_stress: silero-BERT homograph stress — only marks known homographs (~2 000 words)
+    "ru_silero_stress":                     ("audiobook_generator.normalizers.ru_silero_stress_normalizer",                   "SileroStressNormalizer"),
     # ru_llm_stress_ambiguity: LLM-assisted homograph stress resolution
     "ru_llm_stress_ambiguity":              ("audiobook_generator.normalizers.ru_stress_ambiguity_normalizer",                 "StressAmbiguityLLMNormalizer"),
     # ru_proper_names: deterministic capitalised-word stress via tsnorm backend
