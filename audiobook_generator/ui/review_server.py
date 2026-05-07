@@ -192,13 +192,29 @@ async def get_chapters(dir: str):
 
 
 def _config_voice_name2() -> Optional[str]:
-    """Return voice_name2 from server config or INI, or None if not set."""
+    """Return voice_name2 from server config or INI, or None if not set.
+
+    Understands both the legacy ``voice_name2`` INI key and the new ``voices``
+    JSON format introduced in the audio_tempo commit (second key = voice2).
+    """
     cfg = getattr(app.state, "review_config", None)
     v2 = getattr(cfg, "voice_name2", None)
     if v2:
         return v2
     try:
         ini = load_merged_ini()
+        # New voices JSON format: {"primary": {...}, "secondary": {...}}
+        # Second key is voice_name2.
+        voices_json = ini.get("voices")
+        if voices_json:
+            import json as _json
+            try:
+                _parsed = _json.loads(voices_json)
+                if isinstance(_parsed, dict) and len(_parsed) >= 2:
+                    return list(_parsed.keys())[1]
+            except Exception:
+                pass
+        # Legacy: explicit voice_name2 key
         raw = ini.get("voice_name2")
         if raw:
             return raw
