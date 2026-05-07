@@ -479,6 +479,13 @@ class AudiobookGenerator:
                 smooth_join_ms, start_declick_ms, start_declick_fade_ms, lf_preamble_fade_ms = (
                     self._chunk_merge_options()
                 )
+                # Fallback path: no sentence-text info, so we can't map chunks
+                # to specific voices.  Assume every chunk uses the primary voice
+                # so that ``audio_tempo`` configured for it still applies.
+                voices_config = getattr(self.config, "voices_config", {}) or {}
+                primary_voice = getattr(self.config, "voice_name", "") or ""
+                ffmpeg_path = getattr(self.config, "ffmpeg_path", None) or "ffmpeg"
+                chunk_voice_map = {cp: None for cp in chunk_files}
                 _merge_audio_files(
                     chunk_files,
                     chapter_file,
@@ -488,6 +495,10 @@ class AudiobookGenerator:
                     start_declick_ms,
                     start_declick_fade_ms,
                     lf_preamble_fade_ms,
+                    voices_config=voices_config,
+                    chunk_voice_map=chunk_voice_map,
+                    primary_voice=primary_voice,
+                    ffmpeg_path=ffmpeg_path,
                 )
                 # Derive title from chapter_key: replace _ with space, strip numbers if any
                 title = chapter_key.replace("_", " ")
@@ -519,6 +530,7 @@ class AudiobookGenerator:
         from audiobook_generator.core.chunked_audio_generator import (
             split_sentences_with_voices,
             _merge_audio_files,
+            _voices_need_tempo,
         )
         from audiobook_generator.utils.sentence_hash import sentence_hash as _shash
 
@@ -591,16 +603,18 @@ class AudiobookGenerator:
                 text, language, voice2=voice2
             )
             sentences = [s for s, _v in sentence_voice_pairs]
+            sentence_voices = [v for _s, v in sentence_voice_pairs]
 
             # ------------------------------------------------------------------
             # Check chunk completeness
             # ------------------------------------------------------------------
             chapter_chunks_dir = chunks_root / chapter_key
             chunk_paths: list[str] = []
+            chunk_voice_map: dict[str, str | None] = {}
             all_present = bool(sentences) and chapter_chunks_dir.exists()
 
             if all_present:
-                for sentence in sentences:
+                for sentence, sv in zip(sentences, sentence_voices):
                     h = _shash(sentence)
                     found_ext: str | None = None
                     for ext in _AUDIO_EXTS:
@@ -609,9 +623,9 @@ class AudiobookGenerator:
                             found_ext = ext
                             break
                     if found_ext:
-                        chunk_paths.append(
-                            str(chapter_chunks_dir / f"{h}{found_ext}")
-                        )
+                        cp = str(chapter_chunks_dir / f"{h}{found_ext}")
+                        chunk_paths.append(cp)
+                        chunk_voice_map[cp] = sv  # None → primary voice
                     else:
                         all_present = False
                         break
@@ -624,10 +638,16 @@ class AudiobookGenerator:
                 first_ext = _Path(chunk_paths[0]).suffix  # e.g. ".wav"
                 chapter_out = str(audio_root / f"{chapter_key}{first_ext}")
 
-                # Skip rebuild if the chapter file is already up-to-date:
-                # exists AND is newer than every chunk (mtime-based).
+                voices_config = getattr(self.config, "voices_config", {}) or {}
+                ffmpeg_path = getattr(self.config, "ffmpeg_path", None) or "ffmpeg"
+                primary_voice = getattr(self.config, "voice_name", "") or ""
+                needs_audio_tempo = _voices_need_tempo(voices_config)
+
+                # Skip rebuild if the chapter file is already up-to-date AND no
+                # per-voice audio_tempo is configured (tempo settings live in INI
+                # and don't bump chunk mtime, so we can't rely on mtime alone).
                 chapter_out_path = _Path(chapter_out)
-                if chapter_out_path.exists():
+                if chapter_out_path.exists() and not needs_audio_tempo:
                     chapter_mtime = chapter_out_path.stat().st_mtime
                     newest_chunk_mtime = max(
                         _Path(p).stat().st_mtime for p in chunk_paths
@@ -660,10 +680,15 @@ class AudiobookGenerator:
                         start_declick_ms,
                         start_declick_fade_ms,
                         lf_preamble_fade_ms,
+                        voices_config=voices_config,
+                        chunk_voice_map=chunk_voice_map,
+                        primary_voice=primary_voice,
+                        ffmpeg_path=ffmpeg_path,
                     )
                     logger.info(
-                        "  Chapter %d '%s': rebuilt from %d chunks → %s",
+                        "  Chapter %d '%s': rebuilt from %d chunks → %s%s",
                         idx, title, len(chunk_paths), chapter_out,
+                        " (per-chunk audio_tempo applied)" if needs_audio_tempo else "",
                     )
                     result.append((chapter_out, title))
                 except Exception as exc:

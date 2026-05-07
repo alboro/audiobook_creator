@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from contextlib import contextmanager
@@ -1302,6 +1303,7 @@ def _apply_audio_tempo(
         )
 
 
+
 def _prepare_chunks_with_tempo(
     chunk_paths: List[str],
     chunk_voice_map: Dict[str, Optional[str]],
@@ -1312,30 +1314,34 @@ def _prepare_chunks_with_tempo(
 ) -> List[str]:
     """Return a new list of chunk paths with per-voice ``audio_tempo`` applied.
 
-    Chunks whose voice has ``audio_tempo`` ≠ 1.0 in *voices_config* are
-    time-stretched into *tmp_dir* (as new WAV files); the rest are returned
-    unchanged.  Caller is responsible for cleaning up *tmp_dir*.
+    Each chunk whose effective voice has ``audio_tempo`` ≠ 1.0 in *voices_config*
+    is time-stretched into *tmp_dir* (a new WAV file).  Chunks without a tempo
+    override are returned unchanged (path identity).
 
-    If no voice has a non-trivial ``audio_tempo``, the original list is
-    returned as-is (no files are written).
+    *chunk_voice_map* maps chunk path → voice name (None means primary voice).
+    *primary_voice* is used to resolve None entries.
+
+    If no voice has a non-trivial ``audio_tempo`` (or *tmp_dir* is None), the
+    original list is returned as-is — no files are written.
+
+    Caller is responsible for cleaning up *tmp_dir*.
     """
-    # Collect the tempos that differ from 1.0 so we can short-circuit early.
     needs_tempo: Dict[str, float] = {}
-    for voice_key, vcfg in voices_config.items():
+    for voice_key, vcfg in (voices_config or {}).items():
         t = vcfg.get("audio_tempo")
         if t is not None and abs(float(t) - 1.0) > 1e-6:
             needs_tempo[voice_key] = float(t)
 
-    if not needs_tempo:
-        return chunk_paths
+    if not needs_tempo or not tmp_dir:
+        return list(chunk_paths)
 
     result: List[str] = []
     counter = 0
     for cp in chunk_paths:
-        voice = chunk_voice_map.get(cp)
+        voice = chunk_voice_map.get(cp) if chunk_voice_map else None
         effective_voice = voice if voice is not None else primary_voice
         tempo = needs_tempo.get(effective_voice)
-        if tempo is not None and tmp_dir is not None:
+        if tempo is not None:
             counter += 1
             dst = os.path.join(tmp_dir, f"tempo_{counter:05d}_{Path(cp).name}")
             _apply_audio_tempo(cp, dst, tempo, ffmpeg_path=ffmpeg_path)
@@ -1343,6 +1349,17 @@ def _prepare_chunks_with_tempo(
         else:
             result.append(cp)
     return result
+
+
+def _voices_need_tempo(voices_config: Optional[Dict[str, dict]]) -> bool:
+    """True iff any voice in *voices_config* has audio_tempo ≠ 1.0."""
+    if not voices_config:
+        return False
+    for vcfg in voices_config.values():
+        t = vcfg.get("audio_tempo")
+        if t is not None and abs(float(t) - 1.0) > 1e-6:
+            return True
+    return False
 
 
 def _merge_audio_files(
@@ -1355,40 +1372,81 @@ def _merge_audio_files(
     start_declick_fade_ms: int = 0,
     lf_preamble_fade_ms: int = 0,
     gap_preamble_fade_ms: int = 0,
+    *,
+    voices_config: Optional[Dict[str, dict]] = None,
+    chunk_voice_map: Optional[Dict[str, Optional[str]]] = None,
+    primary_voice: Optional[str] = None,
+    ffmpeg_path: str = "ffmpeg",
 ) -> None:
     """Concatenate audio chunk files into *output_path*.
 
     For WAV files uses Python's stdlib ``wave`` module with optional true
     cosine crossfade, DC offset removal, and silence gap insertion.
     For other formats falls back to pydub (crossfade only).
+
+    Per-chunk audio_tempo
+    ---------------------
+    When *voices_config*, *chunk_voice_map*, and *primary_voice* are all
+    provided AND at least one voice has ``audio_tempo`` ≠ 1.0, every chunk
+    whose voice has a tempo override is first time-stretched (via ffmpeg
+    ``atempo``) into a temporary directory before merging.  The temp dir is
+    cleaned up after the merge completes (success or failure).
     """
     if not chunk_paths:
         return
-    fmt = Path(output_path).suffix.lstrip(".").lower() or "wav"
-    if fmt == "wav":
-        _merge_wav_files(
-            chunk_paths,
-            output_path,
-            smooth_join_ms,
-            dc_remove,
-            gap_ms,
-            start_declick_ms,
-            start_declick_fade_ms,
-            lf_preamble_fade_ms,
-            gap_preamble_fade_ms,
-        )
-    else:
-        _merge_via_pydub(
-            chunk_paths,
-            output_path,
-            fmt,
-            smooth_join_ms,
-            gap_ms,
-            start_declick_ms,
-            start_declick_fade_ms,
-            lf_preamble_fade_ms,
-            gap_preamble_fade_ms,
-        )
+
+    tempo_tmp_dir: Optional[str] = None
+    merge_paths = chunk_paths
+    try:
+        if (
+            voices_config
+            and chunk_voice_map is not None
+            and primary_voice is not None
+            and _voices_need_tempo(voices_config)
+        ):
+            tempo_tmp_dir = tempfile.mkdtemp(prefix="epub2ab_tempo_")
+            merge_paths = _prepare_chunks_with_tempo(
+                chunk_paths,
+                chunk_voice_map,
+                voices_config,
+                primary_voice,
+                ffmpeg_path=ffmpeg_path,
+                tmp_dir=tempo_tmp_dir,
+            )
+            n_stretched = sum(1 for a, b in zip(chunk_paths, merge_paths) if a != b)
+            logger.info(
+                "audio_tempo: prepared %d/%d chunk(s) (primary=%s) in %s",
+                n_stretched, len(chunk_paths), primary_voice, tempo_tmp_dir,
+            )
+
+        fmt = Path(output_path).suffix.lstrip(".").lower() or "wav"
+        if fmt == "wav":
+            _merge_wav_files(
+                merge_paths,
+                output_path,
+                smooth_join_ms,
+                dc_remove,
+                gap_ms,
+                start_declick_ms,
+                start_declick_fade_ms,
+                lf_preamble_fade_ms,
+                gap_preamble_fade_ms,
+            )
+        else:
+            _merge_via_pydub(
+                merge_paths,
+                output_path,
+                fmt,
+                smooth_join_ms,
+                gap_ms,
+                start_declick_ms,
+                start_declick_fade_ms,
+                lf_preamble_fade_ms,
+                gap_preamble_fade_ms,
+            )
+    finally:
+        if tempo_tmp_dir:
+            shutil.rmtree(tempo_tmp_dir, ignore_errors=True)
 
 
 class ChunkedAudioGenerator:
@@ -1559,9 +1617,9 @@ class ChunkedAudioGenerator:
             )
             return True
 
-        # Collect synthesised chunk paths in sentence order (FS-based),
-        # keeping a parallel voice map for per-voice audio_tempo processing.
-        chunk_paths = []
+        # Collect synthesised chunk paths in sentence order (FS-based) and build
+        # parallel voice map for per-chunk audio_tempo handling.
+        chunk_paths: List[str] = []
         chunk_voice_map: Dict[str, Optional[str]] = {}
         for s, v in sentence_voice_pairs:
             cp = self._chunk_path(chapter_key, _sentence_hash(s), v)
@@ -1572,6 +1630,11 @@ class ChunkedAudioGenerator:
         if not chunk_paths:
             logger.error("Chapter %d: no audio chunks available for merging.", chapter_idx)
             return False
+
+        voices_config: Dict[str, dict] = getattr(self.config, "voices_config", {}) or {}
+        ffmpeg_path: str = getattr(self.config, "ffmpeg_path", None) or "ffmpeg"
+        primary_voice: str = self.config.voice_name or ""
+        needs_audio_tempo = _voices_need_tempo(voices_config)
 
         # Skip merge if the chapter WAV already reflects all current chunks.
         start_declick_ms = 0
@@ -1592,7 +1655,13 @@ class ChunkedAudioGenerator:
                 getattr(self.config, "tts_chunk_declick_gap_preamble_fade_ms", 10) or 10
             )
 
-        if not start_declick_ms and not lf_preamble_fade_ms and not gap_preamble_fade_ms and self._chapter_wav_is_uptodate(output_file, chunk_paths):
+        if (
+            not start_declick_ms
+            and not lf_preamble_fade_ms
+            and not gap_preamble_fade_ms
+            and not needs_audio_tempo
+            and self._chapter_wav_is_uptodate(output_file, chunk_paths)
+        ):
             logger.info(
                 "Chapter %d WAV is up-to-date, skipping re-merge: %s", chapter_idx, output_file
             )
@@ -1605,37 +1674,26 @@ class ChunkedAudioGenerator:
         dc_remove = bool(getattr(self.config, "tts_chunk_dc_remove", True))
         gap_ms = int(getattr(self.config, "tts_chunk_merge_gap_ms", 0) or 0)
 
-        # Apply per-voice audio_tempo (time-stretch) using ffmpeg atempo.
-        # Chunks that need tempo adjustment are written to a temp dir; the
-        # rest keep their original paths.  The temp dir is cleaned up after merge.
-        voices_config: Dict[str, dict] = getattr(self.config, "voices_config", {}) or {}
-        ffmpeg_path: str = getattr(self.config, "ffmpeg_path", None) or "ffmpeg"
-        primary_voice: str = self.config.voice_name or ""
-
-        with tempfile.TemporaryDirectory(prefix="epub2ab_tempo_") as tempo_tmp:
-            merge_paths = _prepare_chunks_with_tempo(
+        # Merge — _merge_audio_files applies per-chunk audio_tempo internally
+        # when voices_config / chunk_voice_map are provided.
+        try:
+            _merge_audio_files(
                 chunk_paths,
-                chunk_voice_map,
-                voices_config,
-                primary_voice,
+                output_file,
+                smooth_join_ms,
+                dc_remove,
+                gap_ms,
+                start_declick_ms,
+                start_declick_fade_ms,
+                lf_preamble_fade_ms,
+                gap_preamble_fade_ms,
+                voices_config=voices_config,
+                chunk_voice_map=chunk_voice_map,
+                primary_voice=primary_voice,
                 ffmpeg_path=ffmpeg_path,
-                tmp_dir=tempo_tmp,
             )
-            # Merge chunks into the chapter output file.
-            try:
-                _merge_audio_files(
-                    merge_paths,
-                    output_file,
-                    smooth_join_ms,
-                    dc_remove,
-                    gap_ms,
-                    start_declick_ms,
-                    start_declick_fade_ms,
-                    lf_preamble_fade_ms,
-                    gap_preamble_fade_ms,
-                )
-                logger.info("Chapter %d merged into %s", chapter_idx, output_file)
-                return True
-            except Exception as exc:
-                logger.error("Chapter %d merge failed: %s", chapter_idx, exc)
-                return False
+            logger.info("Chapter %d merged into %s", chapter_idx, output_file)
+            return True
+        except Exception as exc:
+            logger.error("Chapter %d merge failed: %s", chapter_idx, exc)
+            return False
