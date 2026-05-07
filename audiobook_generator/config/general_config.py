@@ -117,6 +117,14 @@ class GeneralConfig:
         # removes that preamble by analysing ZCR and spectral concentration.
         self.tts_chunk_declick_lf_preamble = _get('tts_chunk_declick_lf_preamble', bool, False)
         self.tts_chunk_declick_lf_preamble_fade_ms = _get('tts_chunk_declick_lf_preamble_fade_ms', int, 8)
+        # Gap-preamble detection: removes a spurious vocalization at the start of
+        # a chunk that is followed by a clear silence gap (≥ 200 ms) before the
+        # real first word.  Pattern: [artifact] → [silence gap] → [speech].
+        # Safe because the minimum gap threshold (200 ms) prevents false positives
+        # on natural comma/period pauses; the hard max-trim cap (1200 ms) prevents
+        # accidentally removing real speech even on slow-paced output.
+        self.tts_chunk_declick_gap_preamble = _get('tts_chunk_declick_gap_preamble', bool, False)
+        self.tts_chunk_declick_gap_preamble_fade_ms = _get('tts_chunk_declick_gap_preamble_fade_ms', int, 10)
 
         self.openai_api_key = _get('openai_api_key')
         self.openai_base_url = _get('openai_base_url')

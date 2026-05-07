@@ -61,6 +61,8 @@ FIELD_SECTIONS: Dict[str, str] = {
     "tts_chunk_declick_fade_ms": "tts",
     "tts_chunk_declick_lf_preamble": "tts",
     "tts_chunk_declick_lf_preamble_fade_ms": "tts",
+    "tts_chunk_declick_gap_preamble": "tts",
+    "tts_chunk_declick_gap_preamble_fade_ms": "tts",
     "tts_log_text": "tts",
     # [tts.openai] -------------------------------------------------------------
     "openai_api_key": "tts.openai",
@@ -172,6 +174,7 @@ BOOL_FIELDS = {
     "tts_log_text", "tts_chunk_smooth_join", "tts_chunk_dc_remove",
     "tts_chunk_declick_start",
     "tts_chunk_declick_lf_preamble",
+    "tts_chunk_declick_gap_preamble",
 }
 
 

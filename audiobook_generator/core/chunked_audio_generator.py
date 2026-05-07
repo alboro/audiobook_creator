@@ -806,6 +806,166 @@ def _remove_lf_preamble_from_pcm(
     return samples.tobytes()
 
 
+# ---------------------------------------------------------------------------
+# Gap-preamble detection: [active content] → [silence gap] → [speech]
+# ---------------------------------------------------------------------------
+# CosyVoice (and other TTS engines) occasionally emit a spurious vocalization
+# at the very start of a chunk — before any actual speech.  The artifact is
+# typically 200-600 ms long and is followed by a clear silence gap (≥ 200 ms)
+# before the real first word.  The lf_preamble detector above handles a *short*
+# (< 80 ms) low-frequency burst; this detector handles the longer "warm-up"
+# artifact pattern.
+#
+# Detection criteria:
+#   1. The chunk starts with active audio (not silence).
+#   2. Within the first _GAP_PREAMBLE_MAX_MS, a silence gap appears.
+#   3. The gap lasts at least _GAP_PREAMBLE_MIN_GAP_MS.
+#   4. Active audio (real speech) follows the gap.
+#   5. The inferred speech-start point is at most _GAP_PREAMBLE_MAX_TRIM_MS.
+#
+# Safety: only trim if the silence gap is long (≥ 300 ms by default) to avoid
+# accidentally cutting a natural comma pause or the first word of the sentence.
+
+_GAP_PREAMBLE_MAX_MS = 700        # search for silence gap starting within first N ms
+_GAP_PREAMBLE_MIN_GAP_MS = 300    # silence gap must last at least this long
+_GAP_PREAMBLE_SILENCE_THRESH = 0.04  # normalised RMS below this → silence (~−28 dBFS)
+_GAP_PREAMBLE_WIN_MS = 10         # RMS analysis window
+_GAP_PREAMBLE_MAX_TRIM_MS = 1200  # hard cap: inferred speech start must be before this
+
+
+def _gap_preamble_trim_frames(
+    samples,       # array.array('h') — int16 PCM, little-endian
+    nchannels: int,
+    framerate: int,
+) -> int:
+    """Return the number of frames to remove from the start to skip a
+    gap-preamble artifact (spurious vocalization followed by silence).
+
+    Returns 0 if the pattern is not detected or if trimming would be unsafe.
+    """
+    n_frames = len(samples) // nchannels
+    win_fr = max(1, int(framerate * _GAP_PREAMBLE_WIN_MS / 1000))
+    max_search_fr = min(n_frames, int(framerate * _GAP_PREAMBLE_MAX_MS / 1000))
+    min_gap_fr = max(win_fr, int(framerate * _GAP_PREAMBLE_MIN_GAP_MS / 1000))
+    max_trim_fr = int(framerate * _GAP_PREAMBLE_MAX_TRIM_MS / 1000)
+
+    if n_frames < win_fr * 3:
+        return 0
+
+    # Build a normalised mono view up to max_trim_frames.
+    total_look = min(n_frames, max_trim_fr + win_fr)
+    if nchannels == 1:
+        mono = [samples[i] for i in range(total_look)]
+    else:
+        mono = [
+            sum(samples[i * nchannels + ch] for ch in range(nchannels)) / nchannels
+            for i in range(total_look)
+        ]
+
+    abs_peak = max(abs(v) for v in mono) if mono else 0
+    if abs_peak < 32767 * 0.005:
+        return 0  # essentially silent — nothing to trim
+
+    thresh = _GAP_PREAMBLE_SILENCE_THRESH  # normalised
+
+    def _win_rms(start: int) -> float:
+        end = min(len(mono), start + win_fr)
+        w = mono[start:end]
+        if not w:
+            return 0.0
+        return (sum(v * v for v in w) / len(w)) ** 0.5 / abs_peak
+
+    # ── Condition 1: chunk starts with active content ────────────────────────
+    if _win_rms(0) < thresh:
+        return 0  # starts with silence — no preamble
+
+    # ── Condition 2: find first silence gap within max_search_fr ────────────
+    gap_start_fr: Optional[int] = None
+    pos = win_fr  # start searching after the first active window
+    while pos < max_search_fr:
+        if _win_rms(pos) < thresh:
+            gap_start_fr = pos
+            break
+        pos += win_fr
+
+    if gap_start_fr is None:
+        return 0  # no silence gap found — no preamble
+
+    # ── Condition 3: measure gap length ──────────────────────────────────────
+    gap_pos = gap_start_fr
+    while gap_pos < total_look and _win_rms(gap_pos) < thresh:
+        gap_pos += win_fr
+
+    gap_fr = gap_pos - gap_start_fr
+    if gap_fr < min_gap_fr:
+        return 0  # gap too short (likely a natural intra-word pause)
+
+    # ── Condition 4: active content follows the gap ───────────────────────────
+    speech_start_fr = gap_pos
+    if speech_start_fr >= len(mono) or _win_rms(speech_start_fr) < thresh:
+        return 0  # nothing follows the gap — don't trim
+
+    # ── Condition 5: hard cap on trim amount ─────────────────────────────────
+    if speech_start_fr > max_trim_fr:
+        logger.debug(
+            "Gap preamble: speech onset at %.0f ms exceeds hard cap %.0f ms — skipping",
+            speech_start_fr * 1000.0 / framerate,
+            _GAP_PREAMBLE_MAX_TRIM_MS,
+        )
+        return 0
+
+    logger.debug(
+        "Gap preamble detected: preamble=0..%.0f ms, gap=%.0f..%.0f ms, "
+        "trimming %.0f ms",
+        gap_start_fr * 1000.0 / framerate,
+        gap_start_fr * 1000.0 / framerate,
+        speech_start_fr * 1000.0 / framerate,
+        speech_start_fr * 1000.0 / framerate,
+    )
+    return speech_start_fr
+
+
+def _remove_gap_preamble_from_pcm(
+    data: bytes,
+    sampwidth: int,
+    nchannels: int,
+    framerate: int,
+    fade_ms: int,
+) -> bytes:
+    """Detect and remove a gap-preamble artifact from PCM data.
+
+    Only operates on 16-bit PCM.  Returns *data* unchanged when no artifact
+    is found.
+    """
+    if sampwidth != 2 or nchannels <= 0 or framerate <= 0:
+        return data
+
+    import array as _arr
+    import sys as _sys
+
+    samples = _arr.array('h')
+    samples.frombytes(data)
+    if _sys.byteorder != 'little':
+        samples.byteswap()
+
+    trim_frames = _gap_preamble_trim_frames(samples, nchannels, framerate)
+    if trim_frames <= 0:
+        return data
+
+    del samples[:trim_frames * nchannels]
+
+    fade_frames = min(len(samples) // nchannels, int(framerate * fade_ms / 1000))
+    for frame in range(fade_frames):
+        factor = (frame + 1) / fade_frames
+        for ch in range(nchannels):
+            idx = frame * nchannels + ch
+            samples[idx] = int(samples[idx] * factor)
+
+    if _sys.byteorder != 'little':
+        samples.byteswap()
+    return samples.tobytes()
+
+
 def _remove_start_click_from_pcm(    data: bytes,
     sampwidth: int,
     nchannels: int,
@@ -880,6 +1040,7 @@ def _merge_wav_files(
     start_declick_ms: int = 0,
     start_declick_fade_ms: int = 0,
     lf_preamble_fade_ms: int = 0,
+    gap_preamble_fade_ms: int = 0,
 ) -> None:
     """Fast WAV concatenation with optional de-click, DC removal, and crossfade."""
     import wave
@@ -909,6 +1070,8 @@ def _merge_wav_files(
             )
         if lf_preamble_fade_ms > 0:
             data = _remove_lf_preamble_from_pcm(data, sw, nc, fr, lf_preamble_fade_ms)
+        if gap_preamble_fade_ms > 0:
+            data = _remove_gap_preamble_from_pcm(data, sw, nc, fr, gap_preamble_fade_ms)
         if dc_remove:
             data = _remove_dc_offset(data, sw, nc)
         chunks.append(data)
@@ -983,6 +1146,7 @@ def _merge_via_pydub(
     start_declick_ms: int = 0,
     start_declick_fade_ms: int = 0,
     lf_preamble_fade_ms: int = 0,
+    gap_preamble_fade_ms: int = 0,
 ) -> None:
     """Merge non-WAV audio files using pydub with optional crossfade."""
     try:
@@ -1003,7 +1167,6 @@ def _merge_via_pydub(
             if start_declick_fade_ms > 0:
                 seg = seg.fade_in(start_declick_fade_ms)
         if lf_preamble_fade_ms > 0:
-            import numpy as _np
             import array as _arr
             _raw = seg.get_array_of_samples()
             _data = _arr.array('h', _raw)
@@ -1014,6 +1177,16 @@ def _merge_via_pydub(
                 seg = seg[int(_trim * 1000.0 / _fr):]
                 if lf_preamble_fade_ms > 0:
                     seg = seg.fade_in(lf_preamble_fade_ms)
+        if gap_preamble_fade_ms > 0:
+            import array as _arr2
+            _raw2 = seg.get_array_of_samples()
+            _data2 = _arr2.array('h', _raw2)
+            _nc2 = seg.channels
+            _fr2 = seg.frame_rate
+            _trim2 = _gap_preamble_trim_frames(_data2, _nc2, _fr2)
+            if _trim2 > 0:
+                seg = seg[int(_trim2 * 1000.0 / _fr2):]
+                seg = seg.fade_in(gap_preamble_fade_ms)
         if combined is None:
             combined = seg
             continue
@@ -1181,6 +1354,7 @@ def _merge_audio_files(
     start_declick_ms: int = 0,
     start_declick_fade_ms: int = 0,
     lf_preamble_fade_ms: int = 0,
+    gap_preamble_fade_ms: int = 0,
 ) -> None:
     """Concatenate audio chunk files into *output_path*.
 
@@ -1201,6 +1375,7 @@ def _merge_audio_files(
             start_declick_ms,
             start_declick_fade_ms,
             lf_preamble_fade_ms,
+            gap_preamble_fade_ms,
         )
     else:
         _merge_via_pydub(
@@ -1212,6 +1387,7 @@ def _merge_audio_files(
             start_declick_ms,
             start_declick_fade_ms,
             lf_preamble_fade_ms,
+            gap_preamble_fade_ms,
         )
 
 
@@ -1410,7 +1586,13 @@ class ChunkedAudioGenerator:
                 getattr(self.config, "tts_chunk_declick_lf_preamble_fade_ms", 8) or 8
             )
 
-        if not start_declick_ms and not lf_preamble_fade_ms and self._chapter_wav_is_uptodate(output_file, chunk_paths):
+        gap_preamble_fade_ms = 0
+        if getattr(self.config, "tts_chunk_declick_gap_preamble", False):
+            gap_preamble_fade_ms = int(
+                getattr(self.config, "tts_chunk_declick_gap_preamble_fade_ms", 10) or 10
+            )
+
+        if not start_declick_ms and not lf_preamble_fade_ms and not gap_preamble_fade_ms and self._chapter_wav_is_uptodate(output_file, chunk_paths):
             logger.info(
                 "Chapter %d WAV is up-to-date, skipping re-merge: %s", chapter_idx, output_file
             )
@@ -1450,6 +1632,7 @@ class ChunkedAudioGenerator:
                     start_declick_ms,
                     start_declick_fade_ms,
                     lf_preamble_fade_ms,
+                    gap_preamble_fade_ms,
                 )
                 logger.info("Chapter %d merged into %s", chapter_idx, output_file)
                 return True
