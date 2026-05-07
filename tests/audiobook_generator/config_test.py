@@ -29,7 +29,8 @@ def _make_args(**kwargs):
     """Minimal argparse-like namespace with all defaults None."""
     defaults = dict(
         input_file=None, output_folder=None, mode=None, tts=None,
-        language=None, voice_name=None, voice_name2=None, output_format=None, model_name=None,
+        language=None, voice_name=None, voice_name2=None, voices=None,
+        output_format=None, model_name=None,
         tts_trailing_strip_chars=None, tts_trim_silence=None, tts_chunk_smooth_join=None,
         tts_chunk_smooth_join_ms=None, tts_chunk_declick_start=None,
         tts_chunk_declick_start_ms=None, tts_chunk_declick_fade_ms=None,
@@ -523,6 +524,141 @@ class TestAudioFolderOverride(unittest.TestCase):
                 gen._detect_audio_folder(),
                 "/mounted/aldem/books/ebook_creator/actual_version/MyBook/wav",
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests: voices JSON config
+# ---------------------------------------------------------------------------
+
+class TestVoicesConfig(unittest.TestCase):
+    """GeneralConfig.voices_config: parsing, overrides, backward compat."""
+
+    def _cfg(self, **kwargs):
+        from audiobook_generator.config.general_config import GeneralConfig
+        return GeneralConfig(_make_args(**kwargs))
+
+    # --- no voices set: backward compat ---
+
+    def test_no_voices_keeps_voice_name(self):
+        cfg = self._cfg(voice_name="my_voice")
+        self.assertEqual(cfg.voice_name, "my_voice")
+
+    def test_no_voices_keeps_voice_name2(self):
+        cfg = self._cfg(voice_name="v1", voice_name2="v2")
+        self.assertEqual(cfg.voice_name2, "v2")
+
+    def test_no_voices_keeps_speed(self):
+        cfg = self._cfg(speed="1.5")
+        self.assertEqual(cfg.speed, "1.5")
+
+    def test_no_voices_voices_config_empty(self):
+        cfg = self._cfg(voice_name="v1")
+        self.assertEqual(cfg.voices_config, {})
+
+    # --- voices JSON: basic parsing ---
+
+    def test_single_voice_sets_voice_name(self):
+        cfg = self._cfg(voices='{"reference_dictor_short": {}}')
+        self.assertEqual(cfg.voice_name, "reference_dictor_short")
+
+    def test_two_voices_sets_voice_name_and_voice_name2(self):
+        cfg = self._cfg(voices='{"v1": {}, "v2": {}}')
+        self.assertEqual(cfg.voice_name, "v1")
+        self.assertEqual(cfg.voice_name2, "v2")
+
+    def test_single_voice_voice_name2_is_none(self):
+        cfg = self._cfg(voices='{"v1": {}}')
+        self.assertIsNone(cfg.voice_name2)
+
+    def test_voices_config_contains_all_keys(self):
+        cfg = self._cfg(voices='{"v1": {}, "v2": {}, "v3": {}}')
+        self.assertEqual(list(cfg.voices_config.keys()), ["v1", "v2", "v3"])
+
+    # --- per-voice speed ---
+
+    def test_primary_voice_speed_overrides_global_speed(self):
+        cfg = self._cfg(voices='{"v1": {"speed": 1.3}}', speed="1.0")
+        self.assertEqual(cfg.speed, 1.3)
+
+    def test_primary_voice_no_speed_keeps_global_speed(self):
+        cfg = self._cfg(voices='{"v1": {}}', speed="1.0")
+        self.assertEqual(cfg.speed, "1.0")
+
+    def test_secondary_voice_speed_in_voices_config(self):
+        cfg = self._cfg(voices='{"v1": {}, "v2": {"speed": 0.9}}')
+        self.assertEqual(cfg.voices_config["v2"]["speed"], 0.9)
+
+    def test_speed_as_float_in_json(self):
+        cfg = self._cfg(voices='{"v1": {"speed": 1.5}}')
+        self.assertAlmostEqual(cfg.speed, 1.5)
+
+    def test_speed_as_int_in_json(self):
+        cfg = self._cfg(voices='{"v1": {"speed": 2}}')
+        self.assertEqual(cfg.speed, 2)
+
+    # --- invalid JSON: silent fallback ---
+
+    def test_invalid_json_voices_config_empty(self):
+        cfg = self._cfg(voices="not json at all")
+        self.assertEqual(cfg.voices_config, {})
+
+    def test_invalid_json_voice_name_unchanged(self):
+        cfg = self._cfg(voices="not json", voice_name="fallback")
+        self.assertEqual(cfg.voice_name, "fallback")
+
+    def test_json_array_ignored(self):
+        """JSON array is not a valid voices config (must be object)."""
+        cfg = self._cfg(voices='["v1", "v2"]', voice_name="fallback")
+        self.assertEqual(cfg.voices_config, {})
+        self.assertEqual(cfg.voice_name, "fallback")
+
+    # --- voices overrides explicit voice_name ---
+
+    def test_voices_wins_over_voice_name(self):
+        cfg = self._cfg(voices='{"from_voices": {}}', voice_name="explicit")
+        self.assertEqual(cfg.voice_name, "from_voices")
+
+    def test_voices_wins_over_voice_name2(self):
+        cfg = self._cfg(voices='{"v1": {}, "from_voices2": {}}', voice_name2="explicit2")
+        self.assertEqual(cfg.voice_name2, "from_voices2")
+
+    # --- ini load integration ---
+
+    def test_ini_voices_loaded(self):
+        import tempfile
+        from pathlib import Path
+        from audiobook_generator.config.ini_config_manager import load_ini
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = _make_ini(
+                Path(tmp) / "test.ini",
+                '[tts]\nvoices = {"primary": {"speed": 1.2}, "secondary": {}}\n',
+            )
+            values = load_ini(ini)
+        self.assertIn("voices", values)
+        self.assertIn('"primary"', values["voices"])
+
+    def test_full_roundtrip_via_general_config(self):
+        """voices from INI → GeneralConfig sets voice_name, voice_name2, speed."""
+        import tempfile
+        from pathlib import Path
+        from audiobook_generator.config.ini_config_manager import load_ini, merge_ini_into_args
+        from audiobook_generator.config.general_config import GeneralConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = _make_ini(
+                Path(tmp) / "test.ini",
+                '[tts]\nvoices = {"primary_v": {"speed": 1.4}, "secondary_v": {"speed": 0.8}}\n',
+            )
+            values = load_ini(ini)
+
+        args = _make_args()
+        merge_ini_into_args(args, values)
+        cfg = GeneralConfig(args)
+
+        self.assertEqual(cfg.voice_name, "primary_v")
+        self.assertEqual(cfg.voice_name2, "secondary_v")
+        self.assertAlmostEqual(cfg.speed, 1.4)
+        self.assertEqual(cfg.voices_config["secondary_v"]["speed"], 0.8)
 
 
 if __name__ == "__main__":

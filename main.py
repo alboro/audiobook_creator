@@ -311,6 +311,16 @@ def handle_args():
     )
 
     parser.add_argument(
+        "--voices",
+        help=(
+            'JSON map of voice name → per-voice settings. '
+            'Key order: first = primary voice, second = secondary (quoted speech). '
+            'Example: \'{"reference_dictor_short": {"speed": 1.2}, "reference_long_22s": {}}\'. '
+            'When set, overrides voice_name, voice_name2, and primary voice speed.'
+        ),
+    )
+
+    parser.add_argument(
         "--output_format",
         help="Output format for the text-to-speech service. Supported format depends on selected TTS provider",
     )

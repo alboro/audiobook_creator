@@ -79,6 +79,19 @@ class GeneralConfig:
         self.language = _get('language')
         self.voice_name = _get('voice_name')
         self.voice_name2 = _get('voice_name2')
+        # ── voices JSON  ──────────────────────────────────────────────────────
+        # JSON object: voice name → per-voice settings dict.
+        # Keys in insertion order: first key = primary voice, second = secondary.
+        # Supported per-voice settings:
+        #   "speed"       – TTS generation speed (passed to the TTS engine).
+        #   "audio_tempo" – WAV time-stretch factor applied at chunk-merge stage
+        #                   via ffmpeg atempo (1.0 = no change, 1.1 = 10% faster).
+        #                   Unlike "speed" this does NOT affect TTS generation;
+        #                   it post-processes the already-generated WAV chunks.
+        # When set, overrides voice_name, voice_name2, and primary voice speed.
+        # Example:
+        #   voices = {"reference_dictor_short": {"speed": 1.2}, "reference_long_22s": {"audio_tempo": 1.1}}
+        self.voices = _get('voices')
         self.output_format = _get('output_format')
         self.model_name = _get('model_name')
         self.tts_trailing_strip_chars = _get('tts_trailing_strip_chars')
@@ -127,6 +140,31 @@ class GeneralConfig:
         # OpenAI specific arguments
         self.instructions = _get('instructions')
         self.speed = _get('speed')
+
+        # ── voices_config: derived from voices JSON  ───────────────────────────
+        # Parse the voices JSON and override voice_name / voice_name2 / speed.
+        # voices_config is exposed so _voice_override() can read per-voice speed.
+        self.voices_config: dict = {}
+        if self.voices:
+            import json as _json
+            try:
+                _parsed = _json.loads(self.voices)
+                if isinstance(_parsed, dict):
+                    self.voices_config = {
+                        str(k): (v if isinstance(v, dict) else {})
+                        for k, v in _parsed.items()
+                    }
+            except Exception:
+                pass  # invalid JSON — voices_config stays empty; INI warning logged below
+
+        if self.voices_config:
+            _vkeys = list(self.voices_config.keys())
+            self.voice_name = _vkeys[0]
+            self.voice_name2 = _vkeys[1] if len(_vkeys) >= 2 else None
+            # Primary voice speed overrides global speed when specified.
+            _primary_speed = self.voices_config.get(self.voice_name, {}).get('speed')
+            if _primary_speed is not None:
+                self.speed = _primary_speed
 
         # Normalizer specific arguments
         self.normalize = _get('normalize')

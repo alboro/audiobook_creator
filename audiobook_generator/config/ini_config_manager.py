@@ -45,6 +45,7 @@ FIELD_SECTIONS: Dict[str, str] = {
     "tts": "tts",
     "voice_name": "tts",
     "voice_name2": "tts",
+    "voices": "tts",
     "model_name": "tts",
     "output_format": "tts",
     "speed": "tts",

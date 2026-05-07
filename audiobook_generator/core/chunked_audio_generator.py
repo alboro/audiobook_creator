@@ -25,9 +25,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from audiobook_generator.core.audio_chunk_store import AudioChunkStore
 from audiobook_generator.core.audio_tags import AudioTags
@@ -1066,6 +1068,110 @@ def _trim_trailing_silence(audio_path: str, tail_ms: int = SILENCE_TAIL_MS) -> N
         logger.debug("Silence trimming failed for %s: %s", audio_path, exc)
 
 
+# ---------------------------------------------------------------------------
+# Per-voice audio tempo (time-stretch via ffmpeg atempo)
+# ---------------------------------------------------------------------------
+
+def _atempo_filter(tempo: float) -> str:
+    """Return an ffmpeg audio-filter string that applies *tempo* time-stretch.
+
+    The ``atempo`` filter accepts values in the range [0.5, 2.0].  For values
+    outside this range we chain multiple ``atempo`` stages, e.g.::
+
+        tempo=3.0  →  "atempo=2.0,atempo=1.5"
+        tempo=0.25 →  "atempo=0.5,atempo=0.5"
+
+    A tempo of 1.0 returns an empty string (no filter needed).
+    """
+    if abs(tempo - 1.0) < 1e-6:
+        return ""
+    filters: List[str] = []
+    remaining = tempo
+    while remaining > 2.0 + 1e-9:
+        filters.append("atempo=2.0")
+        remaining /= 2.0
+    while remaining < 0.5 - 1e-9:
+        filters.append("atempo=0.5")
+        remaining /= 0.5
+    filters.append(f"atempo={remaining:.6f}")
+    return ",".join(filters)
+
+
+def _apply_audio_tempo(
+    src: str,
+    dst: str,
+    tempo: float,
+    ffmpeg_path: str = "ffmpeg",
+) -> None:
+    """Time-stretch *src* WAV by *tempo* and write result to *dst*.
+
+    Uses ffmpeg ``atempo`` filter (no pitch change).  Raises ``RuntimeError``
+    on ffmpeg failure.
+    """
+    af = _atempo_filter(tempo)
+    if not af:
+        # tempo ≈ 1.0 — just copy
+        import shutil
+        shutil.copy2(src, dst)
+        return
+    cmd = [
+        ffmpeg_path or "ffmpeg",
+        "-y",
+        "-i", src,
+        "-af", af,
+        dst,
+    ]
+    logger.debug("Applying audio_tempo=%.4f to %s → %s", tempo, src, dst)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg atempo failed for {src!r} (tempo={tempo}): {result.stderr[-500:]}"
+        )
+
+
+def _prepare_chunks_with_tempo(
+    chunk_paths: List[str],
+    chunk_voice_map: Dict[str, Optional[str]],
+    voices_config: Dict[str, dict],
+    primary_voice: str,
+    ffmpeg_path: str = "ffmpeg",
+    tmp_dir: Optional[str] = None,
+) -> List[str]:
+    """Return a new list of chunk paths with per-voice ``audio_tempo`` applied.
+
+    Chunks whose voice has ``audio_tempo`` ≠ 1.0 in *voices_config* are
+    time-stretched into *tmp_dir* (as new WAV files); the rest are returned
+    unchanged.  Caller is responsible for cleaning up *tmp_dir*.
+
+    If no voice has a non-trivial ``audio_tempo``, the original list is
+    returned as-is (no files are written).
+    """
+    # Collect the tempos that differ from 1.0 so we can short-circuit early.
+    needs_tempo: Dict[str, float] = {}
+    for voice_key, vcfg in voices_config.items():
+        t = vcfg.get("audio_tempo")
+        if t is not None and abs(float(t) - 1.0) > 1e-6:
+            needs_tempo[voice_key] = float(t)
+
+    if not needs_tempo:
+        return chunk_paths
+
+    result: List[str] = []
+    counter = 0
+    for cp in chunk_paths:
+        voice = chunk_voice_map.get(cp)
+        effective_voice = voice if voice is not None else primary_voice
+        tempo = needs_tempo.get(effective_voice)
+        if tempo is not None and tmp_dir is not None:
+            counter += 1
+            dst = os.path.join(tmp_dir, f"tempo_{counter:05d}_{Path(cp).name}")
+            _apply_audio_tempo(cp, dst, tempo, ffmpeg_path=ffmpeg_path)
+            result.append(dst)
+        else:
+            result.append(cp)
+    return result
+
+
 def _merge_audio_files(
     chunk_paths: List[str],
     output_path: str,
@@ -1140,16 +1246,27 @@ class ChunkedAudioGenerator:
 
     @contextmanager
     def _voice_override(self, voice: Optional[str]):
-        """Temporarily swap config.voice_name for one TTS call."""
+        """Temporarily swap config.voice_name (and per-voice speed) for one TTS call.
+
+        When ``voices_config`` contains a ``speed`` entry for *voice*, that value
+        is also applied for the duration of the call and restored afterwards.
+        """
         if voice is None or voice == self.config.voice_name:
             yield
             return
-        original = self.config.voice_name
+        original_voice = self.config.voice_name
+        original_speed = getattr(self.config, 'speed', None)
         self.config.voice_name = voice
+        # Apply per-voice speed if configured.
+        _voices_cfg = getattr(self.config, 'voices_config', {})
+        _voice_speed = _voices_cfg.get(voice, {}).get('speed')
+        if _voice_speed is not None:
+            self.config.speed = _voice_speed
         try:
             yield
         finally:
-            self.config.voice_name = original
+            self.config.voice_name = original_voice
+            self.config.speed = original_speed
 
     def _chapter_wav_is_uptodate(self, output_file: str, chunk_paths: List[str]) -> bool:
         """Return True if *output_file* exists and is newer than every chunk in *chunk_paths*.
@@ -1266,12 +1383,16 @@ class ChunkedAudioGenerator:
             )
             return True
 
-        # Collect synthesised chunk paths in sentence order (FS-based).
-        chunk_paths = [
-            self._chunk_path(chapter_key, _sentence_hash(s), v)
-            for s, v in sentence_voice_pairs
-            if os.path.exists(self._chunk_path(chapter_key, _sentence_hash(s), v))
-        ]
+        # Collect synthesised chunk paths in sentence order (FS-based),
+        # keeping a parallel voice map for per-voice audio_tempo processing.
+        chunk_paths = []
+        chunk_voice_map: Dict[str, Optional[str]] = {}
+        for s, v in sentence_voice_pairs:
+            cp = self._chunk_path(chapter_key, _sentence_hash(s), v)
+            if os.path.exists(cp):
+                chunk_paths.append(cp)
+                chunk_voice_map[cp] = v  # None → primary voice
+
         if not chunk_paths:
             logger.error("Chapter %d: no audio chunks available for merging.", chapter_idx)
             return False
@@ -1302,20 +1423,36 @@ class ChunkedAudioGenerator:
         dc_remove = bool(getattr(self.config, "tts_chunk_dc_remove", True))
         gap_ms = int(getattr(self.config, "tts_chunk_merge_gap_ms", 0) or 0)
 
-        # Merge chunks into the chapter output file.
-        try:
-            _merge_audio_files(
+        # Apply per-voice audio_tempo (time-stretch) using ffmpeg atempo.
+        # Chunks that need tempo adjustment are written to a temp dir; the
+        # rest keep their original paths.  The temp dir is cleaned up after merge.
+        voices_config: Dict[str, dict] = getattr(self.config, "voices_config", {}) or {}
+        ffmpeg_path: str = getattr(self.config, "ffmpeg_path", None) or "ffmpeg"
+        primary_voice: str = self.config.voice_name or ""
+
+        with tempfile.TemporaryDirectory(prefix="epub2ab_tempo_") as tempo_tmp:
+            merge_paths = _prepare_chunks_with_tempo(
                 chunk_paths,
-                output_file,
-                smooth_join_ms,
-                dc_remove,
-                gap_ms,
-                start_declick_ms,
-                start_declick_fade_ms,
-                lf_preamble_fade_ms,
+                chunk_voice_map,
+                voices_config,
+                primary_voice,
+                ffmpeg_path=ffmpeg_path,
+                tmp_dir=tempo_tmp,
             )
-            logger.info("Chapter %d merged into %s", chapter_idx, output_file)
-            return True
-        except Exception as exc:
-            logger.error("Chapter %d merge failed: %s", chapter_idx, exc)
-            return False
+            # Merge chunks into the chapter output file.
+            try:
+                _merge_audio_files(
+                    merge_paths,
+                    output_file,
+                    smooth_join_ms,
+                    dc_remove,
+                    gap_ms,
+                    start_declick_ms,
+                    start_declick_fade_ms,
+                    lf_preamble_fade_ms,
+                )
+                logger.info("Chapter %d merged into %s", chapter_idx, output_file)
+                return True
+            except Exception as exc:
+                logger.error("Chapter %d merge failed: %s", chapter_idx, exc)
+                return False
